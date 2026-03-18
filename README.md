@@ -116,7 +116,7 @@ The tool is most useful when you run **at least two UDP-level sources simultaneo
 Requires Rust (stable). Clone and build:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/shredwatch
+git clone https://github.com/schmiatz/shredwatch
 cd shredwatch
 cargo build --release
 ```
