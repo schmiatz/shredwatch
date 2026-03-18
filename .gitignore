@@ -1,0 +1,7 @@
+/target/
+keypair.json
+*.json
+config.toml
+*.log
+.env
+.claude/

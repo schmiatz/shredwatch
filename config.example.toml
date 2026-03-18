@@ -1,0 +1,68 @@
+# Benchmark duration in seconds
+duration_secs = 60
+
+[sources.raw_udp]
+enabled = true
+# Local address to bind for receiving Turbine shreds
+bind_addr = "0.0.0.0:8001"
+# Max UDP receive buffer size
+recv_buf_size = 10485760   # 10MB
+
+[sources.jito]
+enabled = false
+
+# ── Option A: Direct block engine (no proxy needed) ──────────────────────────
+# The benchmark handles authentication and heartbeats internally.
+# Jito sends raw UDP shreds directly to your machine.
+#
+block_engine_url = "https://frankfurt.mainnet.block-engine.jito.wtf"
+auth_keypair_path = "/path/to/jito-keypair.json"
+#
+# Desired regions: Jito regional nodes that will forward shreds to you.
+# Subscribe to the region(s) nearest your server for lowest latency.
+# Each region relays shreds from validators in that geographic area.
+# Available: amsterdam, frankfurt, ny, slc, tokyo
+desired_regions = ["frankfurt"]
+#
+# Your machine's public IP — Jito sends UDP shreds to this address.
+public_ip = "1.2.3.4"
+#
+# Local port to bind for receiving Jito's direct UDP shreds.
+udp_bind_addr = "0.0.0.0:20000"
+
+# ── Option B: Already-running jito-shredstream-proxy ─────────────────────────
+# If you already have the proxy running, configure it with e.g.:
+#   jito-shredstream-proxy shredstream \
+#     --block-engine-url https://frankfurt.mainnet.block-engine.jito.wtf \
+#     --auth-keypair /path/to/keypair.json \
+#     --desired-regions frankfurt \
+#     --dest-ip-ports 127.0.0.1:50001 \    ← raw shreds forwarded here
+#     --grpc-service-port 10001              ← entry stream available here
+#
+# Raw shreds from proxy --dest-ip-ports (shred-level comparison):
+proxy_udp_addr = ""   # e.g. "127.0.0.1:50001"
+#
+# Assembled entries from proxy --grpc-service-port (slot/entry-level):
+proxy_grpc_addr = ""  # e.g. "http://127.0.0.1:10001"
+#
+# Note: Option A and Option B can be enabled simultaneously.
+
+[sources.doublezero]
+enabled = false
+# Multicast group IP (from doublezero on-chain account)
+multicast_group = "239.1.1.1"
+# UDP port for the multicast stream
+port = 9000
+# Interface to join multicast on (usually "doublezero1")
+interface = "doublezero1"
+
+[sources.yellowstone]
+enabled = false
+# Yellowstone gRPC endpoint
+endpoint = "http://my-validator:10000"
+# Auth token
+x_token = ""
+
+[output]
+# Path for detailed log file (JSON lines). Leave empty to disable.
+log_file = "shredwatch.log"
