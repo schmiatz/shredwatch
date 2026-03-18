@@ -44,12 +44,12 @@ pub async fn run(
             return;
         }
 
-        // Look up interface by name to get its IP
-        let iface_ip = get_interface_ip(&config.interface).unwrap_or(Ipv4Addr::UNSPECIFIED);
-
-        // Join multicast group
-        if let Err(e) = socket.join_multicast_v4(&multicast_ip, &iface_ip) {
-            error!("DoubleZero: join_multicast_v4 failed: {}", e);
+        // Join multicast using interface index (ip_mreqn) rather than interface IP.
+        // doublezero1 is a WireGuard tunnel and may have no routable IPv4 address,
+        // so the classic ip_mreq approach (join_multicast_v4 by IP) would silently
+        // fall back to INADDR_ANY and join on the wrong interface.
+        if let Err(e) = join_multicast_by_index(&socket, multicast_ip, &config.interface) {
+            error!("DoubleZero: join_multicast failed: {}", e);
             return;
         }
 
@@ -107,8 +107,55 @@ pub async fn run(
     Ok(())
 }
 
+/// Join a multicast group using the interface index (ip_mreqn) rather than its IP address.
+/// This is required for interfaces like doublezero1 that may have no IPv4 address assigned.
+#[cfg(target_os = "linux")]
+fn join_multicast_by_index(socket: &Socket, multicast_ip: Ipv4Addr, iface_name: &str) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::io::AsRawFd;
+
+    let iface_index = unsafe {
+        let name = CString::new(iface_name)?;
+        libc::if_nametoindex(name.as_ptr())
+    };
+    if iface_index == 0 {
+        anyhow::bail!("Interface '{}' not found (if_nametoindex returned 0)", iface_name);
+    }
+
+    let octets = multicast_ip.octets();
+    let mreqn = libc::ip_mreqn {
+        imr_multiaddr: libc::in_addr {
+            s_addr: u32::from_be_bytes(octets).to_be(),
+        },
+        imr_address: libc::in_addr { s_addr: 0 }, // INADDR_ANY
+        imr_ifindex: iface_index as libc::c_int,
+    };
+
+    let ret = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IP,
+            libc::IP_ADD_MEMBERSHIP,
+            &mreqn as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::ip_mreqn>() as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn join_multicast_by_index(socket: &Socket, multicast_ip: Ipv4Addr, iface_name: &str) -> Result<()> {
+    // On non-Linux (e.g. macOS for local testing): fall back to join by interface IP
+    let iface_ip = get_interface_ip(iface_name).unwrap_or(Ipv4Addr::UNSPECIFIED);
+    socket.join_multicast_v4(&multicast_ip, &iface_ip)?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
 fn get_interface_ip(iface_name: &str) -> Option<Ipv4Addr> {
-    // Try to resolve interface name to IP via `ip addr show <iface>`
     use std::process::Command;
     let output = Command::new("ip")
         .args(["addr", "show", iface_name])
