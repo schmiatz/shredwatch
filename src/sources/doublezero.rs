@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use anyhow::Result;
 
 use crate::config::DoubleZeroConfig;
@@ -78,19 +78,51 @@ pub async fn run(
         );
 
         let mut buf = vec![0u8; 1280];
+        let mut raw_count: u64 = 0;
+        let mut parsed_count: u64 = 0;
+        let mut last_log = std::time::Instant::now();
         loop {
             if cancel.is_cancelled() {
                 break;
             }
             match std_socket.recv_from(&mut buf) {
-                Ok((len, _)) => {
+                Ok((len, src)) => {
                     let received_at = Instant::now();
+                    raw_count += 1;
+
+                    // On the very first packet, dump its header bytes so we can
+                    // verify the shred format / detect any wrapper header.
+                    if raw_count == 1 {
+                        let dump_len = len.min(96);
+                        let hex: String = buf[..dump_len]
+                            .iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        info!(
+                            "DoubleZero: first packet from {} len={} header bytes: {}",
+                            src, len, hex
+                        );
+                    }
+
                     if let Some(key) = parse_shred_key(&buf[..len]) {
+                        parsed_count += 1;
                         let _ = tx.send(ShredEvent {
                             source: SourceId::DoubleZero,
                             key,
                             received_at,
                         });
+                    } else {
+                        debug!("DoubleZero: packet len={} did not parse as shred", len);
+                    }
+
+                    // Log raw vs parsed counts every 5 seconds
+                    if last_log.elapsed() >= Duration::from_secs(5) {
+                        info!(
+                            "DoubleZero: {} raw packets received, {} parsed as shreds",
+                            raw_count, parsed_count
+                        );
+                        last_log = std::time::Instant::now();
                     }
                 }
                 Err(e)
@@ -101,7 +133,14 @@ pub async fn run(
                 }
             }
         }
-        info!("DoubleZero listener stopped");
+        if raw_count > 0 {
+            info!(
+                "DoubleZero listener stopped ({} raw packets, {} parsed)",
+                raw_count, parsed_count
+            );
+        } else {
+            warn!("DoubleZero listener stopped — zero packets received (multicast join may have failed or iptables is blocking)");
+        }
     });
 
     Ok(())
