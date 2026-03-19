@@ -1,165 +1,136 @@
 # shredwatch
 
-A Solana shred source latency benchmark. Connects to multiple shred sources simultaneously, tracks nanosecond-precision first-arrival times per `(slot, index, shred_type)` tuple, and prints comparison tables showing which source is fastest, most reliable, and cheapest in overhead.
+Connects to multiple Solana shred sources simultaneously, records nanosecond-precision arrival times per `(slot, index, shred_type)` tuple, and prints comparison tables showing which source is fastest, most complete, and cheapest in overhead.
+
+All latency numbers are relative — measured against the earliest arrival across all running sources on the same machine. No clock sync required.
 
 ---
 
-## What the sources measure
+## Sources
 
-### Raw UDP — direct Turbine
+### Raw UDP
 
-You bind a port on your machine and Solana's Turbine protocol delivers shreds directly to you, the same way validators receive them. You need to be in the TVU/shred gossip path — typically you configure a validator or a jito-shredstream-proxy alternative to forward Turbine shreds to your port, or you run a validator node yourself.
+Binds a UDP port and receives raw Turbine shreds directly from the Solana gossip network — the same way a validator's TVU socket does. You need to be in the Turbine shred tree, either by running a validator or by having one forward shreds to your port.
 
-**What it measures:** The raw speed of the Solana gossip/Turbine network delivering shreds to your IP.
-
----
-
-### Jito ShredStream — two sub-modes
-
-**Direct block engine** (no proxy needed): Your machine authenticates with Jito's block engine gRPC, sends periodic heartbeats saying "send shreds to my IP:port", and Jito delivers raw UDP shreds directly to you. These are the same binary format as Turbine shreds.
-
-**Proxy UDP:** You run `jito-shredstream-proxy` locally. It handles auth and heartbeats, then forwards the raw shreds it receives to `127.0.0.1:yourport`. Your machine just listens on that local port.
-
-Both modes produce identical data — raw Solana shreds. The difference is only in who manages the auth. Since shreds arrive via UDP from Jito's infrastructure rather than directly from validators via Turbine, this shows you how much latency Jito's relay adds vs direct Turbine.
-
-**What it measures:** Jito's relay overhead on top of raw Turbine — are you getting shreds faster or slower through Jito's network than through direct Turbine?
+**Measures:** how fast the public Turbine network delivers each shred to your IP. This is the baseline everything else is compared against.
 
 ---
 
-### DoubleZero — multicast
+### Raw Capture (AF_PACKET)
 
-DoubleZero is a private fiber/multicast network for Solana infrastructure. Shreds are multicasted over their network and arrive as raw UDP on a multicast group. You need to be subscribed on-chain and have the `doublezerod` daemon running. The shred binary format is identical to Turbine.
+Opens a raw `AF_PACKET` socket (Linux only, requires `CAP_NET_RAW`) that captures UDP packets at the kernel level without binding to the port. This lets you observe shreds arriving on your validator's TVU port without conflicting with the validator process that already owns it.
 
-**What it measures:** Whether DoubleZero's private network delivers shreds faster than public internet paths (Turbine) and Jito's relay.
+The tool installs a classic BPF filter in the kernel so only packets on the configured port reach userspace.
+
+```bash
+sudo setcap cap_net_raw=eip ./target/release/shredwatch
+```
+
+**Measures:** exactly what your running validator receives, timestamped the instant the packet exits the kernel receive path — the most direct possible view of Turbine delivery to your node.
 
 ---
 
-### Yellowstone gRPC — different granularity entirely
+### Jito ShredStream
 
-Yellowstone is a Geyser plugin running inside a validator. It does not expose raw shreds. Instead:
+Jito runs a shred relay network that receives Turbine shreds and re-distributes them. Supports two modes:
 
-- `SLOT_FIRST_SHRED_RECEIVED` event: fires when the validator's TVU first receives the opening shred of a new slot
-- `SubscribeDeshred`: fires when shreds have been reassembled into entries, before execution
+**Direct mode** — your machine authenticates with a Jito block engine, sends periodic heartbeats containing your public IP and port, and Jito delivers raw UDP shreds directly to you. No proxy process needed.
 
-**What it measures:** Not shred latency, but validator processing latency — how long after the first raw shred arrived on your other sources does Yellowstone signal that the validator has the data. This is inherently slower and at slot granularity, not shred granularity. Shown in a separate table.
+**Proxy mode** — you run `jito-shredstream-proxy` locally. It handles auth and heartbeats, then forwards shreds to a local UDP port you configure.
+
+Both modes deliver identical raw shred data. The Jito source also supports a gRPC sub-connection (`proxy_grpc_addr`) that receives fully assembled entries — these appear as a separate row in the slot/entry latency table.
+
+**Measures:** how much latency Jito's relay adds on top of direct Turbine. If Jito wins more shreds than Raw UDP, it means Jito's network has a better path to some leaders than the public gossip graph.
+
+---
+
+### DoubleZero
+
+DoubleZero operates a private fiber network for Solana infrastructure. Shreds are distributed over a multicast group and arrive as raw UDP on a specific network interface. Requires an on-chain subscription and the `doublezerod` daemon running on your machine.
+
+DoubleZero does not cover all validators — currently roughly 20% of stake. For leaders on that subset its path is often faster; for everyone else it has no data.
+
+**Measures:** whether DoubleZero's private network reaches you faster than the public internet (Turbine) or Jito's relay, on a per-shred basis.
+
+---
+
+### Yellowstone gRPC
+
+Yellowstone is a Geyser plugin running inside a Solana validator. It does not expose raw shreds — it exposes processed validator state. The tool uses it in two ways:
+
+**Slot (FIRST_SHRED_RECEIVED)**
+Subscribes to slot status updates. The `SLOT_FIRST_SHRED_RECEIVED` event fires the moment the validator's TVU first receives the opening shred of a new slot.
+
+Measures: how long after the first raw shred hits your other sources does the connected validator see it. A small delta (2–10 ms) means your raw sources and the validator are on similar network paths. Shown in the *slot/entry latency* table.
+
+**Account subscription** *(optional — set `account_pubkey` in config)*
+Subscribes to account updates for a specific account at `PROCESSED` commitment, plus the entry stream.
+
+Produces **two separate measurements**:
+
+1. *Slot/entry latency table* — time from first raw shred of the slot → account update delivered. This is mostly shred assembly + block execution time (~200–300 ms for a typical slot), not gRPC overhead.
+
+2. *gRPC overhead table* — time from Yellowstone delivering the entry event for the slot → Yellowstone delivering the account update for the transaction inside that entry. This is the pure Yellowstone gRPC delivery latency, with shred assembly and execution time removed. This is the number to watch if you want to evaluate or improve your Yellowstone connection.
 
 ---
 
 ## Output tables
 
-### Latency table — Raw UDP, Jito, DoubleZero
+**LATENCY RELATIVE TO FIRST ARRIVAL**
+Per-shred latency delta vs the globally fastest source. If Raw UDP has p50 = 0 µs and DoubleZero has p50 = 18 µs, DoubleZero consistently lags by ~18 µs at the median. Sources with a lot of zero-deltas are frequently first.
 
-Of all shreds that arrived on this source, how many nanoseconds/microseconds after the globally-first arrival did they come in?
+**FIRST ARRIVAL WINS**
+How often each source received a shred before all others, as a percentage of total unique shreds. The most direct answer to "which source is fastest overall."
 
-> If Raw UDP has p50 = 0 µs and Jito has p50 = 55 µs, it means Jito's relay consistently adds ~55 µs at the median.
+**COVERAGE & RELIABILITY**
+What fraction of all observed shreds each source received. A source can be fast but still miss shreds — coverage shows reliability.
 
-### First arrival wins
+**SHRED TYPE BREAKDOWN**
+Data shreds carry actual block content. FEC (code) shreds are Reed-Solomon parity for erasure recovery. High FEC counts with low data counts may indicate the source is only sending recovery data, not primary shreds.
 
-Which source received each shred first, as a percentage:
+**SLOT / ENTRY LATENCY vs first raw shred arrival**
+For Yellowstone and Jito gRPC entries: latency from the first raw shred of a slot → the gRPC notification. Measured at slot granularity. Includes shred assembly time, so numbers in the hundreds of milliseconds are expected for account updates — this does not mean gRPC is slow.
 
-```
-72% Raw UDP   25% DoubleZero   3% Jito
-```
-
-This is the most direct answer to "which source is fastest." Raw UDP winning 72% of shreds means Turbine usually beats Jito's relay. But DoubleZero winning 25% means for some validators, DoubleZero's private network is faster.
-
-### Coverage
-
-What fraction of all observed shreds did each source actually receive:
-
-```
-Raw UDP 99.8%   Jito 99.3%
-```
-
-Shows reliability — Jito might miss some shreds, or your Turbine peer might drop some.
-
-### Dupes
-
-How many duplicate deliveries each source sends. Jito intentionally sends shreds multiple times for reliability. High dupe counts waste bandwidth but improve coverage.
-
-### Slot/entry latency table — Yellowstone only
-
-```
-p50 = 3.1 ms after first raw shred
-```
-
-How long after the network delivered the first shred does the validator's Geyser plugin notify you. Reflects deshredding time, not network latency.
-
----
-
-## Questions it answers
-
-| Question | How the tool answers it |
-|---|---|
-| Is Jito faster than raw Turbine? | Win % + latency table comparing Raw UDP vs Jito |
-| Does DoubleZero's private network beat public internet? | Win % + p99 comparing DoubleZero vs Raw UDP |
-| How reliable is each source? | Coverage % and missed counts |
-| How much overhead does Jito's relay add? | p50/p99 delta between Jito and Raw UDP |
-| When do I have the data as a Yellowstone subscriber? | Slot latency table — ms after first shred |
-| Which source should I use for a latency-sensitive strategy? | Win % is the direct answer |
-
----
-
-## Limitations
-
-- Does **not** measure absolute wall-clock latency — only relative latency between sources on the **same machine**
-- If you only enable one source, the latency table shows all zeros (nothing to compare against)
-- Yellowstone comparison is not apples-to-apples with the UDP sources — different data granularity
-- Cannot compare sources on different machines (no clock sync)
-
-The tool is most useful when you run **at least two UDP-level sources simultaneously** so the latency deltas are meaningful.
-
----
-
-## Installation
-
-Requires Rust (stable). Clone and build:
-
-```bash
-git clone https://github.com/schmiatz/shredwatch
-cd shredwatch
-cargo build --release
-```
-
-The binary will be at `target/release/shredwatch`.
+**YELLOWSTONE gRPC OVERHEAD (entry processed → account update delivered)**
+Only shown when `account_pubkey` is configured. Measures the pure latency Yellowstone adds after the validator finishes executing the entry containing your transaction. This isolates the gRPC pipeline from everything else. Typical values are 0.5–10 ms.
 
 ---
 
 ## Configuration
 
-Copy `config.example.toml` to `config.toml` and edit:
-
-```bash
-cp config.example.toml config.toml
-```
-
-Enable the sources you want to compare. You need at least two for meaningful results.
-
-### Jito direct mode (recommended — no proxy needed)
+Copy `config.example.toml` to `config.toml`. All fields are optional except at least one source must be enabled. Multiple instances of any source type are supported.
 
 ```toml
-[sources.jito]
-enabled = true
-block_engine_url   = "https://frankfurt.mainnet.block-engine.jito.wtf"
-auth_keypair_path  = "/path/to/your-keypair.json"
-desired_regions    = ["frankfurt"]
-public_ip          = "YOUR_SERVER_PUBLIC_IP"
-udp_bind_addr      = "0.0.0.0:20000"
-proxy_udp_addr     = ""
-proxy_grpc_addr    = ""
-```
+# Fixed duration
+duration_secs = 60
 
-> **Important:** `public_ip` must be your server's actual public IP — Jito sends UDP shreds to that address. Port 20000 (or whatever you set) must be open in your firewall.
+# Or slot range (run stops ~2s after a shred beyond end_slot arrives)
+# start_slot = 350000000
+# end_slot   = 350001000
 
-### Raw UDP (Turbine direct)
-
-Requires being in the shred gossip path or having a validator forward shreds to you:
-
-```toml
-[sources.raw_udp]
-enabled = true
+[[sources.raw_udp]]
 bind_addr = "0.0.0.0:8001"
-recv_buf_size = 10485760
+
+[[sources.pcap]]
+port      = 8001        # your validator's TVU port
+interface = "eth0"      # omit to capture all interfaces
+
+[[sources.jito]]
+block_engine_url  = "https://frankfurt.mainnet.block-engine.jito.wtf"
+auth_keypair_path = "/path/to/keypair.json"
+desired_regions   = ["frankfurt"]
+public_ip         = "1.2.3.4"
+udp_bind_addr     = "0.0.0.0:20000"
+
+[[sources.doublezero]]
+multicast_group = "233.84.178.1"
+port            = 7733
+interface       = "doublezero1"
+
+[[sources.yellowstone]]
+endpoint       = "http://127.0.0.1:10000"
+account_pubkey = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"  # optional
+account_name   = "Token Program"                                   # optional display name
 ```
 
 ---
@@ -167,58 +138,29 @@ recv_buf_size = 10485760
 ## Usage
 
 ```bash
+cargo build --release
+
 # Run with default config.toml
 ./target/release/shredwatch
 
-# Custom config and duration
-./target/release/shredwatch --config my.toml --duration 60
+# Override duration and log file
+./target/release/shredwatch --duration 120 --log-file run.log
 
-# With JSON-lines log file
-./target/release/shredwatch --log-file shredwatch.log
+# Slot range mode (duration ignored when start/end slot set)
+./target/release/shredwatch --config slot-range.toml
 ```
 
-**Options:**
-
-```
--c, --config <FILE>    Path to TOML config file [default: config.toml]
--d, --duration <SECS>  Benchmark duration in seconds (overrides config)
--l, --log-file <FILE>  Log file path (overrides config)
-    --no-log           Disable log file output
+Raw packet capture requires the `cap_net_raw` capability on the binary:
+```bash
+sudo setcap cap_net_raw=eip ./target/release/shredwatch
 ```
 
 ---
 
-## Sample output
+## Limitations
 
-```
-╔══════════════════════════════════════════════════════════════════════════════════════════╗
-║              SHRED BENCHMARK  ·  30s  ·  87,412 unique shreds  ·  2 sources              ║
-║                          started 2025-06-01 14:22:03 UTC                                  ║
-╚══════════════════════════════════════════════════════════════════════════════════════════╝
-
-LATENCY RELATIVE TO FIRST ARRIVAL  (per shred, data + FEC combined)
-┌──────────────────┬──────────┬─────────┬─────────┬─────────┬─────────┬─────────┬──────────┐
-│ Source           │ Shreds   │  p50    │  p90    │  p95    │  p99    │  p99.9  │   max    │
-├──────────────────┼──────────┼─────────┼─────────┼─────────┼─────────┼─────────┼──────────┤
-│ Raw UDP          │ 86,901   │  0 µs   │  0 µs   │  0 µs   │  0 µs   │  12 µs  │  1.8 ms  │
-│ Jito ShredStream │ 85,234   │ 55.2 µs │ 98.4 µs │ 142 µs  │ 891 µs  │  8.1 ms │ 92.3 ms  │
-└──────────────────┴──────────┴─────────┴─────────┴─────────┴─────────┴─────────┴──────────┘
-
-FIRST ARRIVAL WINS  (which source received each shred first)
-┌──────────────────┬───────────┬──────────┐
-│ Source           │ Won First │ Win Rate │
-├──────────────────┼───────────┼──────────┤
-│ Raw UDP          │ 63,847    │ 73.2%    │
-│ Jito ShredStream │ 23,403    │ 26.8%    │
-└──────────────────┴───────────┴──────────┘
-
-COVERAGE & RELIABILITY
-┌──────────────────┬──────────┬──────────┬───────┬────────┐
-│ Source           │ Received │ Coverage │ Dupes │ Missed │
-├──────────────────┼──────────┼──────────┼───────┼────────┤
-│ Raw UDP          │ 86,901   │  99.4%   │ 0     │ 511    │
-│ Jito ShredStream │ 85,234   │  97.5%   │ 891   │ 2,178  │
-└──────────────────┴──────────┴──────────┴───────┴────────┘
-
-  Total unique shreds: 87,412  ·  Total slots observed: 72
-```
+- All latency numbers are relative to the fastest source on the same machine — not absolute wall-clock latency from block production
+- Cannot compare across machines (no clock sync)
+- With only one source enabled, the latency table shows all zeros
+- Yellowstone measurements are at slot/entry granularity and cannot be directly compared to per-shred numbers
+- Raw packet capture and DoubleZero are Linux-only
