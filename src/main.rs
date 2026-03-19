@@ -235,6 +235,11 @@ async fn main() -> Result<()> {
     let registry_agg = Arc::clone(&registry);
     let cancel_agg = cancel.clone();
     let activity_agg = Arc::clone(&activity);
+    // When the first shred beyond end_slot arrives we don't cancel immediately —
+    // we wait a short grace period so straggler shreds for the last slot (delayed
+    // paths, Turbine retransmissions) still make it into the registry.
+    let mut range_end_triggered = false;
+
     let agg_task = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -249,7 +254,15 @@ async fn main() -> Result<()> {
                                 continue;
                             }
                             if slot > end_slot {
-                                if slot_range_mode { cancel_agg.cancel(); }
+                                if slot_range_mode && !range_end_triggered {
+                                    range_end_triggered = true;
+                                    let c = cancel_agg.clone();
+                                    tokio::spawn(async move {
+                                        // Grace period: keep receiving in-range stragglers
+                                        tokio::time::sleep(Duration::from_secs(2)).await;
+                                        c.cancel();
+                                    });
+                                }
                                 continue;
                             }
                             activity_agg.store(true, Ordering::Relaxed);
@@ -267,7 +280,14 @@ async fn main() -> Result<()> {
                                 continue;
                             }
                             if slot > end_slot {
-                                if slot_range_mode { cancel_agg.cancel(); }
+                                if slot_range_mode && !range_end_triggered {
+                                    range_end_triggered = true;
+                                    let c = cancel_agg.clone();
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(Duration::from_secs(2)).await;
+                                        c.cancel();
+                                    });
+                                }
                                 continue;
                             }
                             activity_agg.store(true, Ordering::Relaxed);
