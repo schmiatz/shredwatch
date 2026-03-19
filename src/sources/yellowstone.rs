@@ -19,12 +19,14 @@ pub mod proto {
 
 use proto::geyser::geyser_client::GeyserClient;
 use proto::geyser::{
-    subscribe_update::UpdateOneof, SlotStatus, SubscribeRequest, SubscribeRequestFilterSlots,
+    subscribe_update::UpdateOneof, SlotStatus, SubscribeRequest, SubscribeRequestFilterAccounts,
+    SubscribeRequestFilterSlots,
 };
 
 pub async fn run(
     config: YellowstoneConfig,
     source_id: SourceId,
+    account_source_id: Option<SourceId>,
     tx: mpsc::UnboundedSender<SlotEvent>,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -34,7 +36,7 @@ pub async fn run(
                 break;
             }
 
-            match connect_and_stream(&config, &tx, &cancel, source_id).await {
+            match connect_and_stream(&config, &tx, &cancel, source_id, account_source_id).await {
                 Ok(()) => break,
                 Err(e) => {
                     warn!("Yellowstone stream error: {}, reconnecting...", e);
@@ -56,6 +58,7 @@ async fn connect_and_stream(
     tx: &mpsc::UnboundedSender<SlotEvent>,
     cancel: &CancellationToken,
     source_id: SourceId,
+    account_source_id: Option<SourceId>,
 ) -> anyhow::Result<()> {
     let channel = Channel::from_shared(config.endpoint.clone())?
         .connect()
@@ -63,7 +66,6 @@ async fn connect_and_stream(
 
     info!("Yellowstone: connected to {}", config.endpoint);
 
-    // Subscribe to slot updates only
     let mut slots_filter = HashMap::new();
     slots_filter.insert(
         "bench".to_string(),
@@ -73,15 +75,30 @@ async fn connect_and_stream(
         },
     );
 
+    // Optionally subscribe to account updates when account_pubkey is configured.
+    // Commitment PROCESSED (0) ensures we get the update as early as possible.
+    let mut accounts_filter = HashMap::new();
+    let has_account = !config.account_pubkey.is_empty() && account_source_id.is_some();
+    if has_account {
+        accounts_filter.insert(
+            "bench_account".to_string(),
+            SubscribeRequestFilterAccounts {
+                account: vec![config.account_pubkey.clone()],
+                owner: vec![],
+            },
+        );
+    }
+
     let request = SubscribeRequest {
         slots: slots_filter,
-        accounts: HashMap::new(),
+        accounts: accounts_filter,
         transactions: HashMap::new(),
         transactions_status: HashMap::new(),
         blocks: HashMap::new(),
         blocks_meta: HashMap::new(),
         entry: HashMap::new(),
-        commitment: None,
+        // PROCESSED = 0; only matters when we have an account filter
+        commitment: if has_account { Some(0) } else { None },
         accounts_data_slice: vec![],
         ping: None,
     };
@@ -115,15 +132,30 @@ async fn connect_and_stream(
 
         match msg {
             Some(Ok(update)) => {
-                if let Some(UpdateOneof::Slot(slot_update)) = update.update_oneof {
-                    if slot_update.status == SlotStatus::SlotFirstShredReceived as i32 {
-                        let received_at = Instant::now();
-                        let _ = tx.send(SlotEvent {
-                            source: source_id,
-                            slot: slot_update.slot,
-                            received_at,
-                        });
+                let received_at = Instant::now();
+                match update.update_oneof {
+                    Some(UpdateOneof::Slot(slot_update)) => {
+                        if slot_update.status == SlotStatus::SlotFirstShredReceived as i32 {
+                            let _ = tx.send(SlotEvent {
+                                source: source_id,
+                                slot: slot_update.slot,
+                                received_at,
+                            });
+                        }
                     }
+                    Some(UpdateOneof::Account(acct_update)) => {
+                        // Skip startup snapshots; only process live updates
+                        if !acct_update.is_startup {
+                            if let Some(aid) = account_source_id {
+                                let _ = tx.send(SlotEvent {
+                                    source: aid,
+                                    slot: acct_update.slot,
+                                    received_at,
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             Some(Err(e)) => return Err(e.into()),

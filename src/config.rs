@@ -117,6 +117,14 @@ pub struct YellowstoneConfig {
     pub endpoint: String,
     #[serde(default)]
     pub x_token: String,
+    /// Optional: base58 account pubkey to subscribe to.
+    /// When set, measures how long after the first slot shred it takes
+    /// Yellowstone to deliver the account update at processed commitment.
+    #[serde(default)]
+    pub account_pubkey: String,
+    /// Display name for the account measurement row (optional).
+    #[serde(default)]
+    pub account_name: String,
 }
 
 #[derive(Debug, Deserialize, Default)]

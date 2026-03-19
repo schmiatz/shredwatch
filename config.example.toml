@@ -40,6 +40,9 @@ interface = "doublezero1"
 [[sources.yellowstone]]
 endpoint = "http://my-validator:10000"
 # x_token = ""   # omit if no auth required
+# Optional: measure time from first slot shred → account update delivery (processed)
+# account_pubkey = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+# account_name   = "Token Program"   # display name (defaults to "<source> (account)")
 
 # ── Output (optional) ─────────────────────────────────────────────────────────
 # Omit this section entirely if you don't want a log file.

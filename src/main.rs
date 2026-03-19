@@ -211,7 +211,24 @@ async fn main() -> Result<()> {
         let name = source_name(&cfg.name, "Yellowstone", ys_idx, total_ys);
         let id = alloc_id();
         info!("Starting {} on {}", name, cfg.endpoint);
-        sources::yellowstone::run(cfg.clone(), id, slot_tx.clone(), cancel.clone()).await?;
+
+        // Optionally allocate a second SourceId for the account latency measurement
+        let account_source_id = if !cfg.account_pubkey.is_empty() {
+            let acct_name = if cfg.account_name.is_empty() {
+                format!("{} (account)", name)
+            } else {
+                cfg.account_name.clone()
+            };
+            let acct_id = alloc_id();
+            info!("  → account subscription: {} ({})", acct_name, cfg.account_pubkey);
+            source_names.insert(acct_id, acct_name.clone());
+            active_entry_sources.push((acct_id, acct_name));
+            Some(acct_id)
+        } else {
+            None
+        };
+
+        sources::yellowstone::run(cfg.clone(), id, account_source_id, slot_tx.clone(), cancel.clone()).await?;
         source_names.insert(id, name.clone());
         active_entry_sources.push((id, name));
         ys_idx += 1;
