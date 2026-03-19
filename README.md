@@ -61,14 +61,14 @@ Yellowstone is a Geyser plugin running inside a Solana validator. It does not ex
 **Slot (FIRST_SHRED_RECEIVED)**
 Subscribes to slot status updates. The `SLOT_FIRST_SHRED_RECEIVED` event fires the moment the validator's TVU first receives the opening shred of a new slot.
 
-Measures: how long after the first raw shred hits your other sources does the connected validator see it. A small delta (2–10 ms) means your raw sources and the validator are on similar network paths. Shown in the *slot/entry latency* table.
+Measures: how long after the earliest shred across all your sources arrives does the connected validator see it. A small delta (2–10 ms) means your raw sources and the validator are on similar network paths. Shown in the *slot/entry latency* table.
 
 **Account subscription** *(optional — set `account_pubkey` in config)*
 Subscribes to account updates for a specific account at `PROCESSED` commitment, plus the entry stream.
 
 Produces **two separate measurements**:
 
-1. *Slot/entry latency table* — time from first raw shred of the slot → account update delivered. This is mostly shred assembly + block execution time (~200–300 ms for a typical slot), not gRPC overhead.
+1. *Slot/entry latency table* — time from the earliest shred received for the slot (across all sources) → account update delivered. This is mostly shred assembly + block execution time (~200–300 ms for a typical slot), not gRPC overhead.
 
 2. *gRPC overhead table* — time from Yellowstone delivering the entry event for the slot → Yellowstone delivering the account update for the transaction inside that entry. This is the pure Yellowstone gRPC delivery latency, with shred assembly and execution time removed. This is the number to watch if you want to evaluate or improve your Yellowstone connection.
 
@@ -88,8 +88,8 @@ What fraction of all observed shreds each source received. A source can be fast 
 **SHRED TYPE BREAKDOWN**
 Data shreds carry actual block content. FEC (code) shreds are Reed-Solomon parity for erasure recovery. High FEC counts with low data counts may indicate the source is only sending recovery data, not primary shreds.
 
-**SLOT / ENTRY LATENCY vs first raw shred arrival**
-For Yellowstone and Jito gRPC entries: latency from the first raw shred of a slot → the gRPC notification. Measured at slot granularity. Includes shred assembly time, so numbers in the hundreds of milliseconds are expected for account updates — this does not mean gRPC is slow.
+**SLOT / ENTRY LATENCY vs first shred arrival (any source)**
+For Yellowstone and Jito gRPC entries: latency from the earliest shred received across all your running sources → the gRPC notification. Measured at slot granularity. Includes shred assembly time, so numbers in the hundreds of milliseconds are expected for account updates — this does not mean gRPC is slow.
 
 **YELLOWSTONE gRPC OVERHEAD (entry processed → account update delivered)**
 Only shown when `account_pubkey` is configured. Measures the pure latency Yellowstone adds after the validator finishes executing the entry containing your transaction. This isolates the gRPC pipeline from everything else. Typical values are 0.5–10 ms.

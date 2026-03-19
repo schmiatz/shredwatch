@@ -269,8 +269,8 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
         })
         .collect();
     if !entry_rows.is_empty() {
-        println!("SLOT / ENTRY LATENCY  vs first raw shred arrival");
-        println!("(time from first raw shred for the slot → gRPC delivery; includes shred assembly + execution)");
+        println!("SLOT / ENTRY LATENCY  vs first shred arrival (any source)");
+        println!("(time from earliest shred received across all sources → gRPC delivery; includes shred assembly + execution)");
         println!("{}", Table::new(entry_rows).with(Style::sharp()));
         println!();
     }
