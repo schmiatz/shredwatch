@@ -140,7 +140,7 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
         .map(|s| {
             let p = compute_percentiles(s.latency_ns.clone());
             LatencyRow {
-                source: s.source.name().to_string(),
+                source: s.name.clone(),
                 shreds: num_fmt(s.received),
                 p50: fmt_ns(p.p50),
                 p90: fmt_ns(p.p90),
@@ -166,7 +166,7 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
                 "N/A".to_string()
             };
             WinRow {
-                source: s.source.name().to_string(),
+                source: s.name.clone(),
                 wins: num_fmt(s.wins),
                 win_rate: rate,
             }
@@ -181,7 +181,7 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
         .sources
         .iter()
         .map(|s| CoverageRow {
-            source: s.source.name().to_string(),
+            source: s.name.clone(),
             received: num_fmt(s.received),
             coverage: coverage(s.received, total),
             dupes: num_fmt(s.dupes),
@@ -209,7 +209,7 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
                 0
             };
             ShredTypeRow {
-                source: s.source.name().to_string(),
+                source: s.name.clone(),
                 data: format!("{} ({}%)", num_fmt(s.data_shreds), data_pct),
                 code: format!("{} ({}%)", num_fmt(s.code_shreds), code_pct),
             }
@@ -227,7 +227,7 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
         .map(|s| {
             let p = compute_percentiles(s.latency_ns.clone());
             SlotRow {
-                source: s.source.name().to_string(),
+                source: s.name.clone(),
                 slots: num_fmt(s.slots_seen),
                 p50: fmt_ns(p.p50),
                 p90: fmt_ns(p.p90),

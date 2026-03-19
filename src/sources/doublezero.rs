@@ -13,6 +13,7 @@ use crate::shred::parse_shred_key;
 
 pub async fn run(
     config: DoubleZeroConfig,
+    source_id: SourceId,
     tx: mpsc::UnboundedSender<ShredEvent>,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -108,7 +109,7 @@ pub async fn run(
                     if let Some(key) = parse_shred_key(&buf[..len]) {
                         parsed_count += 1;
                         let _ = tx.send(ShredEvent {
-                            source: SourceId::DoubleZero,
+                            source: source_id,
                             key,
                             received_at,
                         });

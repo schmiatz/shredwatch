@@ -2,10 +2,11 @@ use std::time::Instant;
 use crate::registry::{Registry, SourceId};
 use crate::shred::ShredType;
 
-/// Stats for a shred-level source (Raw UDP, Jito UDP, DoubleZero)
+/// Stats for a shred-level source (Raw UDP, Jito UDP, DoubleZero, …)
 #[derive(Debug, Default)]
 pub struct SourceStats {
-    pub source: SourceId,
+    pub id: SourceId,
+    pub name: String,
     pub received: u64,
     pub data_shreds: u64,
     pub code_shreds: u64,
@@ -19,7 +20,8 @@ pub struct SourceStats {
 /// Stats for an entry/slot-level source (Yellowstone, Jito gRPC entries)
 #[derive(Debug)]
 pub struct EntrySourceStats {
-    pub source: SourceId,
+    pub id: SourceId,
+    pub name: String,
     pub slots_seen: u64,
     /// Latency vs first shred arrival for same slot (nanoseconds)
     pub latency_ns: Vec<u64>,
@@ -81,8 +83,8 @@ pub struct BenchmarkStats {
 
 pub fn compute_stats(
     registry: &Registry,
-    active_shred_sources: &[SourceId],
-    active_entry_sources: &[SourceId],
+    active_shred_sources: &[(SourceId, String)],
+    active_entry_sources: &[(SourceId, String)],
     duration_secs: f64,
 ) -> BenchmarkStats {
     let total_unique_shreds = registry.shreds.len() as u64;
@@ -90,7 +92,7 @@ pub fn compute_stats(
     // Per shred-level source stats
     let mut source_stats: Vec<SourceStats> = active_shred_sources
         .iter()
-        .map(|&s| SourceStats { source: s, ..Default::default() })
+        .map(|(id, name)| SourceStats { id: *id, name: name.clone(), ..Default::default() })
         .collect();
 
     for entry in registry.shreds.iter() {
@@ -101,7 +103,7 @@ pub fn compute_stats(
             let arrivals_from_source: Vec<Instant> = rec
                 .arrivals
                 .iter()
-                .filter(|(src, _)| *src == stats.source)
+                .filter(|(src, _)| *src == stats.id)
                 .map(|(_, t)| *t)
                 .collect();
 
@@ -132,7 +134,7 @@ pub fn compute_stats(
         total_slots: registry.slots.len() as u64,
         entry_sources: active_entry_sources
             .iter()
-            .map(|&s| EntrySourceStats { source: s, slots_seen: 0, latency_ns: vec![] })
+            .map(|(id, name)| EntrySourceStats { id: *id, name: name.clone(), slots_seen: 0, latency_ns: vec![] })
             .collect(),
     };
 
@@ -142,7 +144,7 @@ pub fn compute_stats(
             if let Some(&(_, arrival)) = rec
                 .entry_arrivals
                 .iter()
-                .find(|(s, _)| *s == entry_stats.source)
+                .find(|(s, _)| *s == entry_stats.id)
             {
                 entry_stats.slots_seen += 1;
                 let delta = if arrival >= rec.first_shred_at {

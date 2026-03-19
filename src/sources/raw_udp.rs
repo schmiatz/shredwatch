@@ -11,6 +11,7 @@ use crate::shred::parse_shred_key;
 
 pub async fn run(
     config: RawUdpConfig,
+    source_id: SourceId,
     tx: mpsc::UnboundedSender<ShredEvent>,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -25,17 +26,13 @@ pub async fn run(
             }
         };
 
-        // Set receive buffer size using socket2 via try_clone
         if config.recv_buf_size > 0 {
             if let Ok(cloned) = socket.try_clone() {
-                // Convert std socket to socket2 for buffer size setting
                 let s2 = socket2::Socket::from(cloned);
                 let _ = s2.set_recv_buffer_size(config.recv_buf_size);
-                // s2 is dropped here which closes its fd (the clone), but the original socket remains open
             }
         }
 
-        // Set 100ms read timeout so we can check cancellation
         socket
             .set_read_timeout(Some(std::time::Duration::from_millis(100)))
             .ok();
@@ -52,19 +49,12 @@ pub async fn run(
                 Ok((len, _addr)) => {
                     let received_at = Instant::now();
                     if let Some(key) = parse_shred_key(&buf[..len]) {
-                        let _ = tx.send(ShredEvent {
-                            source: SourceId::RawUdp,
-                            key,
-                            received_at,
-                        });
+                        let _ = tx.send(ShredEvent { source: source_id, key, received_at });
                     }
                 }
                 Err(e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    // timeout — check cancellation on next iteration
-                }
+                        || e.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(e) => {
                     warn!("Raw UDP recv error: {}", e);
                 }

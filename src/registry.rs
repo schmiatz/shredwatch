@@ -2,33 +2,10 @@ use std::time::Instant;
 use dashmap::DashMap;
 use crate::shred::ShredKey;
 
-/// ID for each shred source
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum SourceId {
-    RawUdp = 0,
-    JitoShredStream = 1, // raw UDP shreds from jito-shredstream-proxy --dest-ip-ports
-    DoubleZero = 2,
-    Yellowstone = 3,     // slot-level: SLOT_FIRST_SHRED_RECEIVED
-    JitoEntries = 4,     // entry-level: proxy --grpc-service-port SubscribeEntries
-}
-
-impl Default for SourceId {
-    fn default() -> Self {
-        SourceId::RawUdp
-    }
-}
-
-impl SourceId {
-    pub fn name(&self) -> &'static str {
-        match self {
-            SourceId::RawUdp => "Raw UDP",
-            SourceId::JitoShredStream => "Jito ShredStream (UDP)",
-            SourceId::DoubleZero => "DoubleZero",
-            SourceId::Yellowstone => "Yellowstone gRPC",
-            SourceId::JitoEntries => "Jito Entries (gRPC)",
-        }
-    }
-}
+/// Dynamic source identifier — assigned sequentially at startup.
+/// Use the name map in main/stats for display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct SourceId(pub u32);
 
 /// Event from a shred-level source (Raw UDP, Jito UDP, DoubleZero)
 pub struct ShredEvent {
@@ -56,8 +33,7 @@ pub struct ShredRecord {
 pub struct SlotRecord {
     /// Earliest arrival across all shred-level sources
     pub first_shred_at: Instant,
-    /// First arrival per entry-level source (Yellowstone, JitoEntries, etc.)
-    /// Stores (SourceId, earliest_arrival_time).
+    /// First arrival per entry-level source
     pub entry_arrivals: Vec<(SourceId, Instant)>,
 }
 
@@ -108,7 +84,6 @@ impl Registry {
         self.slots
             .entry(event.slot)
             .and_modify(|rec| {
-                // Keep the minimum arrival time per source
                 if let Some(existing) = rec
                     .entry_arrivals
                     .iter_mut()
@@ -122,7 +97,6 @@ impl Registry {
                 }
             })
             .or_insert_with(|| SlotRecord {
-                // If no shred event seen yet for this slot, use this as approximation
                 first_shred_at: event.received_at,
                 entry_arrivals: vec![(event.source, event.received_at)],
             });

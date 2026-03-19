@@ -24,6 +24,7 @@ use proto::geyser::{
 
 pub async fn run(
     config: YellowstoneConfig,
+    source_id: SourceId,
     tx: mpsc::UnboundedSender<SlotEvent>,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -33,7 +34,7 @@ pub async fn run(
                 break;
             }
 
-            match connect_and_stream(&config, &tx, &cancel).await {
+            match connect_and_stream(&config, &tx, &cancel, source_id).await {
                 Ok(()) => break,
                 Err(e) => {
                     warn!("Yellowstone stream error: {}, reconnecting...", e);
@@ -54,6 +55,7 @@ async fn connect_and_stream(
     config: &YellowstoneConfig,
     tx: &mpsc::UnboundedSender<SlotEvent>,
     cancel: &CancellationToken,
+    source_id: SourceId,
 ) -> anyhow::Result<()> {
     let channel = Channel::from_shared(config.endpoint.clone())?
         .connect()
@@ -117,7 +119,7 @@ async fn connect_and_stream(
                     if slot_update.status == SlotStatus::SlotFirstShredReceived as i32 {
                         let received_at = Instant::now();
                         let _ = tx.send(SlotEvent {
-                            source: SourceId::Yellowstone,
+                            source: source_id,
                             slot: slot_update.slot,
                             received_at,
                         });

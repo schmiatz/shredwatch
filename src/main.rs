@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use clap::Parser;
-use tracing::info;
+use tracing::{info, warn};
 use chrono::Utc;
 use anyhow::{Context, Result};
 
@@ -40,6 +42,19 @@ struct Args {
     no_log: bool,
 }
 
+/// Return an effective display name: use the user-configured name if set,
+/// otherwise fall back to `type_default`, appending an index if there are
+/// multiple enabled instances of the same type.
+fn source_name(configured: &str, type_default: &str, idx: usize, total_enabled: usize) -> String {
+    if !configured.is_empty() {
+        configured.to_string()
+    } else if total_enabled <= 1 {
+        type_default.to_string()
+    } else {
+        format!("{} {}", type_default, idx + 1)
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -72,8 +87,21 @@ async fn main() -> Result<()> {
         })
     };
 
-    let duration = Duration::from_secs(config.duration_secs.max(1));
-    info!("Benchmark duration: {}s", duration.as_secs());
+    // Determine run mode
+    let slot_range_mode = config.start_slot.is_some() || config.end_slot.is_some();
+    let start_slot = config.start_slot.unwrap_or(0);
+    let end_slot = config.end_slot.unwrap_or(u64::MAX);
+    if slot_range_mode {
+        info!(
+            "Slot-range mode: slots {}..{} (silence timeout: {}s)",
+            start_slot,
+            if end_slot == u64::MAX { "∞".to_string() } else { end_slot.to_string() },
+            config.silence_timeout_secs
+        );
+    } else {
+        let dur = config.duration_secs.max(1);
+        info!("Benchmark duration: {}s (silence timeout: {}s)", dur, config.silence_timeout_secs);
+    }
 
     let registry = Arc::new(Registry::new());
     let cancel = CancellationToken::new();
@@ -84,83 +112,159 @@ async fn main() -> Result<()> {
     let (shred_tx, mut shred_rx) = mpsc::unbounded_channel::<ShredEvent>();
     let (slot_tx, mut slot_rx) = mpsc::unbounded_channel::<SlotEvent>();
 
-    // Shred-level sources (compared per (slot, index, shred_type))
-    let mut active_shred_sources: Vec<SourceId> = Vec::new();
-    // Entry/slot-level sources (compared per slot, shown in separate table)
-    let mut active_entry_sources: Vec<SourceId> = Vec::new();
+    // Sequential source ID assignment
+    let mut next_id: u32 = 0;
+    let mut alloc_id = || { let id = SourceId(next_id); next_id += 1; id };
 
-    // Start sources
-    if config.sources.raw_udp.enabled {
-        info!(
-            "Starting Raw UDP source on {}",
-            config.sources.raw_udp.bind_addr
-        );
-        sources::raw_udp::run(
-            config.sources.raw_udp.clone(),
-            shred_tx.clone(),
-            cancel.clone(),
-        )
-        .await?;
-        active_shred_sources.push(SourceId::RawUdp);
+    // (id, name) for each active source
+    let mut active_shred_sources: Vec<(SourceId, String)> = Vec::new();
+    let mut active_entry_sources: Vec<(SourceId, String)> = Vec::new();
+
+    // name lookup for logfile
+    let mut source_names: HashMap<SourceId, String> = HashMap::new();
+
+    // ── Raw UDP sources ────────────────────────────────────────────────────────
+    let total_raw_udp = config.sources.raw_udp.iter().filter(|c| c.enabled).count();
+    let mut raw_udp_idx = 0;
+    for cfg in config.sources.raw_udp.iter().filter(|c| c.enabled) {
+        let name = source_name(&cfg.name, "Raw UDP", raw_udp_idx, total_raw_udp);
+        let id = alloc_id();
+        info!("Starting {} on {}", name, cfg.bind_addr);
+        sources::raw_udp::run(cfg.clone(), id, shred_tx.clone(), cancel.clone()).await?;
+        source_names.insert(id, name.clone());
+        active_shred_sources.push((id, name));
+        raw_udp_idx += 1;
     }
 
-    if config.sources.jito.enabled {
-        let cfg = &config.sources.jito;
-        // Direct mode and proxy UDP both produce shred-level data
+    // ── Jito sources ───────────────────────────────────────────────────────────
+    let total_jito = config.sources.jito.iter().filter(|c| c.enabled).count();
+    let mut jito_idx = 0;
+    for cfg in config.sources.jito.iter().filter(|c| c.enabled) {
         let has_udp = !cfg.block_engine_url.is_empty() || !cfg.proxy_udp_addr.is_empty();
+        let has_grpc = !cfg.proxy_grpc_addr.is_empty();
+
+        let shred_name = source_name(&cfg.name, "Jito ShredStream", jito_idx, total_jito);
+        let entry_name = if cfg.name.is_empty() {
+            source_name("", "Jito Entries", jito_idx, total_jito)
+        } else {
+            format!("{} (entries)", cfg.name)
+        };
+
+        let shred_id = alloc_id();
+        let entry_id = alloc_id();
+
         if has_udp {
-            info!("Starting Jito ShredStream (UDP shreds)");
-            active_shred_sources.push(SourceId::JitoShredStream);
+            info!("Starting {} (UDP shreds)", shred_name);
+            source_names.insert(shred_id, shred_name.clone());
+            active_shred_sources.push((shred_id, shred_name));
         }
-        if !cfg.proxy_grpc_addr.is_empty() {
-            info!("Starting Jito gRPC entries on {}", cfg.proxy_grpc_addr);
-            active_entry_sources.push(SourceId::JitoEntries);
+        if has_grpc {
+            info!("Starting {} on {}", entry_name, cfg.proxy_grpc_addr);
+            source_names.insert(entry_id, entry_name.clone());
+            active_entry_sources.push((entry_id, entry_name));
         }
+
         sources::jito::run(
-            config.sources.jito.clone(),
+            cfg.clone(),
+            shred_id,
+            entry_id,
             shred_tx.clone(),
             slot_tx.clone(),
             cancel.clone(),
-        )
-        .await?;
+        ).await?;
+
+        jito_idx += 1;
     }
 
-    if config.sources.doublezero.enabled {
-        info!("Starting DoubleZero source");
-        sources::doublezero::run(
-            config.sources.doublezero.clone(),
-            shred_tx.clone(),
-            cancel.clone(),
-        )
-        .await?;
-        active_shred_sources.push(SourceId::DoubleZero);
+    // ── DoubleZero sources ─────────────────────────────────────────────────────
+    let total_dz = config.sources.doublezero.iter().filter(|c| c.enabled).count();
+    let mut dz_idx = 0;
+    for cfg in config.sources.doublezero.iter().filter(|c| c.enabled) {
+        let name = source_name(&cfg.name, "DoubleZero", dz_idx, total_dz);
+        let id = alloc_id();
+        info!("Starting {} ({}:{})", name, cfg.multicast_group, cfg.port);
+        sources::doublezero::run(cfg.clone(), id, shred_tx.clone(), cancel.clone()).await?;
+        source_names.insert(id, name.clone());
+        active_shred_sources.push((id, name));
+        dz_idx += 1;
     }
 
-    if config.sources.yellowstone.enabled {
-        info!("Starting Yellowstone gRPC source");
-        sources::yellowstone::run(
-            config.sources.yellowstone.clone(),
-            slot_tx.clone(),
-            cancel.clone(),
-        )
-        .await?;
-        active_entry_sources.push(SourceId::Yellowstone);
+    // ── Yellowstone sources ────────────────────────────────────────────────────
+    let total_ys = config.sources.yellowstone.iter().filter(|c| c.enabled).count();
+    let mut ys_idx = 0;
+    for cfg in config.sources.yellowstone.iter().filter(|c| c.enabled) {
+        let name = source_name(&cfg.name, "Yellowstone", ys_idx, total_ys);
+        let id = alloc_id();
+        info!("Starting {} on {}", name, cfg.endpoint);
+        sources::yellowstone::run(cfg.clone(), id, slot_tx.clone(), cancel.clone()).await?;
+        source_names.insert(id, name.clone());
+        active_entry_sources.push((id, name));
+        ys_idx += 1;
     }
 
-    // Event aggregator task
-    let registry_clone = Arc::clone(&registry);
+    // ── Silence-timeout monitor ────────────────────────────────────────────────
+    // Fires if no shred/slot event arrives for `silence_timeout` seconds.
+    let activity = Arc::new(AtomicBool::new(true)); // start true to allow warmup
+    {
+        let activity = Arc::clone(&activity);
+        let cancel_silence = cancel.clone();
+        let timeout_secs = config.silence_timeout_secs;
+        tokio::spawn(async move {
+            let mut silent_secs = 0u64;
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if cancel_silence.is_cancelled() { break; }
+                if !activity.swap(false, Ordering::Relaxed) {
+                    silent_secs += 1;
+                    if silent_secs >= timeout_secs {
+                        warn!(
+                            "No shreds received for {}s — stopping run",
+                            timeout_secs
+                        );
+                        cancel_silence.cancel();
+                        break;
+                    }
+                } else {
+                    silent_secs = 0;
+                }
+            }
+        });
+    }
+
+    // ── Event aggregator ───────────────────────────────────────────────────────
+    let registry_agg = Arc::clone(&registry);
+    let cancel_agg = cancel.clone();
+    let activity_agg = Arc::clone(&activity);
     let agg_task = tokio::spawn(async move {
         loop {
             tokio::select! {
                 msg = shred_rx.recv() => {
                     match msg {
-                        Some(event) => registry_clone.record_shred(event),
+                        Some(event) => {
+                            let slot = event.key.slot;
+                            if slot < start_slot { continue; }
+                            if slot > end_slot {
+                                if slot_range_mode { cancel_agg.cancel(); }
+                                continue;
+                            }
+                            activity_agg.store(true, Ordering::Relaxed);
+                            registry_agg.record_shred(event);
+                        }
                         None => break,
                     }
                 }
                 msg = slot_rx.recv() => {
                     match msg {
-                        Some(event) => registry_clone.record_slot_event(event),
+                        Some(event) => {
+                            let slot = event.slot;
+                            if slot < start_slot { continue; }
+                            if slot > end_slot {
+                                if slot_range_mode { cancel_agg.cancel(); }
+                                continue;
+                            }
+                            activity_agg.store(true, Ordering::Relaxed);
+                            registry_agg.record_slot_event(event);
+                        }
                         None => break,
                     }
                 }
@@ -168,14 +272,20 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Wait for duration or Ctrl+C
+    // ── Main wait ──────────────────────────────────────────────────────────────
     info!("Benchmark running... press Ctrl+C to stop early");
-    tokio::select! {
-        _ = tokio::time::sleep(duration) => {
-            info!("Duration elapsed, stopping...");
+
+    if config.duration_secs > 0 && !slot_range_mode {
+        let duration = Duration::from_secs(config.duration_secs);
+        tokio::select! {
+            _ = tokio::time::sleep(duration) => { info!("Duration elapsed, stopping..."); }
+            _ = cancel.cancelled() => { info!("Stopped early"); }
+            _ = tokio::signal::ctrl_c() => { info!("Ctrl+C received, stopping..."); }
         }
-        _ = tokio::signal::ctrl_c() => {
-            info!("Ctrl+C received, stopping...");
+    } else {
+        tokio::select! {
+            _ = cancel.cancelled() => { info!("Run complete (slot range or silence timeout)"); }
+            _ = tokio::signal::ctrl_c() => { info!("Ctrl+C received, stopping..."); }
         }
     }
 
@@ -187,7 +297,6 @@ async fn main() -> Result<()> {
     drop(shred_tx);
     drop(slot_tx);
 
-    // Wait for aggregator
     let _ = tokio::time::timeout(Duration::from_secs(2), agg_task).await;
 
     let actual_duration = Instant::now().duration_since(start_instant).as_secs_f64();
@@ -197,14 +306,12 @@ async fn main() -> Result<()> {
         registry.slots.len()
     );
 
-    // Compute and print stats
     let bench_stats = compute_stats(&registry, &active_shred_sources, &active_entry_sources, actual_duration);
     print_results(&bench_stats, start_wall);
 
-    // Write log file
     if let Some(path) = log_path {
         info!("Writing log to {}", path);
-        write_log(&registry, &path, start_instant)
+        write_log(&registry, &path, start_instant, &source_names)
             .with_context(|| format!("Failed to write log: {}", path))?;
         println!("  Log written to: {}", path);
     }

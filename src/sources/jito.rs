@@ -58,6 +58,8 @@ struct TokenPair {
 ///   Produces slot-level events (entry granularity, not raw shreds).
 pub async fn run(
     config: JitoConfig,
+    shred_source_id: SourceId,
+    entry_source_id: SourceId,
     shred_tx: mpsc::UnboundedSender<ShredEvent>,
     slot_tx: mpsc::UnboundedSender<SlotEvent>,
     cancel: CancellationToken,
@@ -68,7 +70,7 @@ pub async fn run(
         let tx = shred_tx.clone();
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_direct_mode(cfg, tx, cancel_clone).await {
+            if let Err(e) = run_direct_mode(cfg, tx, cancel_clone, shred_source_id).await {
                 error!("Jito direct mode error: {:#}", e);
             }
         });
@@ -80,7 +82,7 @@ pub async fn run(
         let tx = shred_tx.clone();
         let cancel_clone = cancel.clone();
         tokio::task::spawn_blocking(move || {
-            udp_listener(&addr, tx, cancel_clone, SourceId::JitoShredStream, "Jito proxy UDP");
+            udp_listener(&addr, tx, cancel_clone, shred_source_id, "Jito proxy UDP");
         });
     }
 
@@ -91,7 +93,7 @@ pub async fn run(
         tokio::spawn(async move {
             loop {
                 if cancel_clone.is_cancelled() { break; }
-                match run_grpc_entries(&addr, &slot_tx, &cancel_clone).await {
+                match run_grpc_entries(&addr, &slot_tx, &cancel_clone, entry_source_id).await {
                     Ok(()) => break,
                     Err(e) => {
                         warn!("Jito gRPC entries error: {:#}, reconnecting...", e);
@@ -113,6 +115,7 @@ async fn run_direct_mode(
     config: JitoConfig,
     shred_tx: mpsc::UnboundedSender<ShredEvent>,
     cancel: CancellationToken,
+    shred_source_id: SourceId,
 ) -> Result<()> {
     let keypair = load_keypair(&config.auth_keypair_path)
         .context("Failed to load Jito auth keypair")?;
@@ -137,7 +140,7 @@ async fn run_direct_mode(
         let tx = shred_tx.clone();
         let cancel_clone = cancel.clone();
         tokio::task::spawn_blocking(move || {
-            udp_listener(&addr, tx, cancel_clone, SourceId::JitoShredStream, "Jito direct UDP");
+            udp_listener(&addr, tx, cancel_clone, shred_source_id, "Jito direct UDP");
         });
     } else {
         warn!("Jito direct mode: udp_bind_addr not set — shreds will be sent by Jito but not captured");
@@ -311,6 +314,7 @@ async fn run_grpc_entries(
     addr: &str,
     tx: &mpsc::UnboundedSender<SlotEvent>,
     cancel: &CancellationToken,
+    source_id: SourceId,
 ) -> anyhow::Result<()> {
     let channel = Channel::from_shared(addr.to_string())?.connect().await?;
     let mut client = ShredstreamProxyClient::new(channel);
@@ -327,7 +331,7 @@ async fn run_grpc_entries(
         match msg {
             Some(Ok(entry)) => {
                 let _ = tx.send(SlotEvent {
-                    source: SourceId::JitoEntries,
+                    source: source_id,
                     slot: entry.slot,
                     received_at: Instant::now(),
                 });
