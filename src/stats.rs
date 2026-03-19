@@ -74,10 +74,22 @@ pub struct SlotStats {
     pub entry_sources: Vec<EntrySourceStats>,
 }
 
+/// Per-source gRPC overhead stats: entry processed → account update delivered.
+/// Only populated for Yellowstone sources with an account_pubkey configured.
+#[derive(Debug)]
+pub struct GrpcOverheadStats {
+    #[allow(dead_code)]
+    pub id: SourceId,
+    pub name: String,
+    pub samples: u64,
+    pub latency_ns: Vec<u64>,
+}
+
 pub struct BenchmarkStats {
     pub sources: Vec<SourceStats>,
     pub total_unique_shreds: u64,
     pub slot_stats: SlotStats,
+    pub grpc_overhead: Vec<GrpcOverheadStats>,
     pub duration_secs: f64,
 }
 
@@ -157,10 +169,23 @@ pub fn compute_stats(
         }
     }
 
+    // gRPC overhead stats: entry processed → account update delivered
+    let grpc_overhead: Vec<GrpcOverheadStats> = active_entry_sources
+        .iter()
+        .filter_map(|(id, name)| {
+            registry.grpc_latencies.get(id).map(|samples| {
+                let v = samples.clone();
+                let count = v.len() as u64;
+                GrpcOverheadStats { id: *id, name: name.clone(), samples: count, latency_ns: v }
+            })
+        })
+        .collect();
+
     BenchmarkStats {
         sources: source_stats,
         total_unique_shreds,
         slot_stats,
+        grpc_overhead,
         duration_secs,
     }
 }

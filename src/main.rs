@@ -17,7 +17,7 @@ mod sources;
 mod output;
 
 use config::Config;
-use registry::{Registry, ShredEvent, SlotEvent, SourceId};
+use registry::{GrpcLatencyEvent, Registry, ShredEvent, SlotEvent, SourceId};
 use stats::compute_stats;
 use output::table::print_results;
 use output::logfile::write_log;
@@ -126,6 +126,7 @@ async fn main() -> Result<()> {
     // Shared event channels
     let (shred_tx, mut shred_rx) = mpsc::unbounded_channel::<ShredEvent>();
     let (slot_tx, mut slot_rx) = mpsc::unbounded_channel::<SlotEvent>();
+    let (grpc_tx, mut grpc_rx) = mpsc::unbounded_channel::<GrpcLatencyEvent>();
 
     // Sequential source ID assignment
     let mut next_id: u32 = 0;
@@ -228,7 +229,7 @@ async fn main() -> Result<()> {
             None
         };
 
-        sources::yellowstone::run(cfg.clone(), id, account_source_id, slot_tx.clone(), cancel.clone()).await?;
+        sources::yellowstone::run(cfg.clone(), id, account_source_id, slot_tx.clone(), grpc_tx.clone(), cancel.clone()).await?;
         source_names.insert(id, name.clone());
         active_entry_sources.push((id, name));
         ys_idx += 1;
@@ -290,6 +291,12 @@ async fn main() -> Result<()> {
     let agg_task = tokio::spawn(async move {
         loop {
             tokio::select! {
+                msg = grpc_rx.recv() => {
+                    match msg {
+                        Some(event) => { registry_agg.record_grpc_latency(event); }
+                        None => break,
+                    }
+                }
                 msg = shred_rx.recv() => {
                     match msg {
                         Some(event) => {
@@ -386,6 +393,7 @@ async fn main() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
     drop(shred_tx);
     drop(slot_tx);
+    drop(grpc_tx);
 
     let _ = tokio::time::timeout(Duration::from_secs(2), agg_task).await;
 

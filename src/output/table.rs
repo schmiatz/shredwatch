@@ -1,5 +1,5 @@
 use tabled::{settings::Style, Table, Tabled};
-use crate::stats::{compute_percentiles, BenchmarkStats};
+use crate::stats::{compute_percentiles, BenchmarkStats, GrpcOverheadStats};
 
 fn fmt_ns(ns: u64) -> String {
     if ns == 0 {
@@ -105,6 +105,37 @@ struct SlotRow {
     p99: String,
     #[tabled(rename = "   max  ")]
     max: String,
+}
+
+#[derive(Tabled)]
+struct GrpcOverheadRow {
+    #[tabled(rename = "Source")]
+    source: String,
+    #[tabled(rename = "Samples")]
+    samples: String,
+    #[tabled(rename = "  p50  ")]
+    p50: String,
+    #[tabled(rename = "  p90  ")]
+    p90: String,
+    #[tabled(rename = "  p95  ")]
+    p95: String,
+    #[tabled(rename = "  p99  ")]
+    p99: String,
+    #[tabled(rename = "   max  ")]
+    max: String,
+}
+
+fn grpc_overhead_row(s: &GrpcOverheadStats) -> GrpcOverheadRow {
+    let p = compute_percentiles(s.latency_ns.clone());
+    GrpcOverheadRow {
+        source: s.name.clone(),
+        samples: num_fmt(s.samples),
+        p50: fmt_ns(p.p50),
+        p90: fmt_ns(p.p90),
+        p95: fmt_ns(p.p95),
+        p99: fmt_ns(p.p99),
+        max: fmt_ns(p.max),
+    }
 }
 
 pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono::Utc>) {
@@ -238,9 +269,23 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
         })
         .collect();
     if !entry_rows.is_empty() {
-        println!("SLOT / ENTRY LATENCY vs first raw shred arrival");
-        println!("(these sources deliver assembled entries, not raw shreds — slot granularity)");
+        println!("SLOT / ENTRY LATENCY  vs first raw shred arrival");
+        println!("(time from first raw shred for the slot → gRPC delivery; includes shred assembly + execution)");
         println!("{}", Table::new(entry_rows).with(Style::sharp()));
+        println!();
+    }
+
+    // gRPC overhead table — only shown when account_pubkey is configured
+    let grpc_rows: Vec<GrpcOverheadRow> = stats
+        .grpc_overhead
+        .iter()
+        .filter(|s| s.samples > 0)
+        .map(grpc_overhead_row)
+        .collect();
+    if !grpc_rows.is_empty() {
+        println!("YELLOWSTONE gRPC OVERHEAD  (entry processed → account update delivered)");
+        println!("(pure gRPC latency after the validator executes the entry — shred assembly time excluded)");
+        println!("{}", Table::new(grpc_rows).with(Style::sharp()));
         println!();
     }
 

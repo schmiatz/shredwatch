@@ -21,6 +21,13 @@ pub struct SlotEvent {
     pub received_at: Instant,
 }
 
+/// A single gRPC overhead sample: time from entry processed → account update delivered.
+/// This measures pure Yellowstone gRPC delivery latency, not shred assembly time.
+pub struct GrpcLatencyEvent {
+    pub source: SourceId,
+    pub latency_ns: u64,
+}
+
 /// Per-shred record in the registry
 pub struct ShredRecord {
     pub first_seen: Instant,
@@ -40,6 +47,8 @@ pub struct SlotRecord {
 pub struct Registry {
     pub shreds: DashMap<ShredKey, ShredRecord>,
     pub slots: DashMap<u64, SlotRecord>,
+    /// Per-source gRPC overhead samples (entry processed → account update delivered), in nanoseconds.
+    pub grpc_latencies: DashMap<SourceId, Vec<u64>>,
     pub start_time: Instant,
 }
 
@@ -48,8 +57,16 @@ impl Registry {
         Self {
             shreds: DashMap::new(),
             slots: DashMap::new(),
+            grpc_latencies: DashMap::new(),
             start_time: Instant::now(),
         }
+    }
+
+    pub fn record_grpc_latency(&self, event: GrpcLatencyEvent) {
+        self.grpc_latencies
+            .entry(event.source)
+            .or_default()
+            .push(event.latency_ns);
     }
 
     pub fn record_shred(&self, event: ShredEvent) {
