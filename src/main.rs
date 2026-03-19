@@ -242,7 +242,12 @@ async fn main() -> Result<()> {
                     match msg {
                         Some(event) => {
                             let slot = event.key.slot;
-                            if slot < start_slot { continue; }
+                            if slot < start_slot {
+                                // Still waiting for range — keep timer alive so
+                                // silence doesn't fire while we wait for start_slot
+                                activity_agg.store(true, Ordering::Relaxed);
+                                continue;
+                            }
                             if slot > end_slot {
                                 if slot_range_mode { cancel_agg.cancel(); }
                                 continue;
@@ -257,7 +262,10 @@ async fn main() -> Result<()> {
                     match msg {
                         Some(event) => {
                             let slot = event.slot;
-                            if slot < start_slot { continue; }
+                            if slot < start_slot {
+                                activity_agg.store(true, Ordering::Relaxed);
+                                continue;
+                            }
                             if slot > end_slot {
                                 if slot_range_mode { cancel_agg.cancel(); }
                                 continue;
