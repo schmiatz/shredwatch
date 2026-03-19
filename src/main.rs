@@ -75,6 +75,20 @@ async fn main() -> Result<()> {
         config.duration_secs = d;
     }
 
+    // Validate: at least one source must be defined and enabled
+    let any_source = config.sources.raw_udp.iter().any(|c| c.enabled)
+        || config.sources.jito.iter().any(|c| c.enabled)
+        || config.sources.doublezero.iter().any(|c| c.enabled)
+        || config.sources.yellowstone.iter().any(|c| c.enabled)
+        || config.sources.pcap.iter().any(|c| c.enabled);
+    if !any_source {
+        anyhow::bail!(
+            "No sources enabled in config. Define at least one source block: \
+             [[sources.raw_udp]], [[sources.jito]], [[sources.doublezero]], \
+             [[sources.yellowstone]], or [[sources.pcap]]."
+        );
+    }
+
     let log_path = if args.no_log {
         None
     } else {
@@ -89,6 +103,7 @@ async fn main() -> Result<()> {
 
     // Determine run mode
     let slot_range_mode = config.start_slot.is_some() || config.end_slot.is_some();
+    let start_slot_configured = config.start_slot.is_some();
     let start_slot = config.start_slot.unwrap_or(0);
     let end_slot = config.end_slot.unwrap_or(u64::MAX);
     if slot_range_mode {
@@ -202,6 +217,20 @@ async fn main() -> Result<()> {
         ys_idx += 1;
     }
 
+    // ── Raw packet capture sources (AF_PACKET) ────────────────────────────────
+    let total_pcap = config.sources.pcap.iter().filter(|c| c.enabled).count();
+    let mut pcap_idx = 0;
+    for cfg in config.sources.pcap.iter().filter(|c| c.enabled) {
+        let name = source_name(&cfg.name, "Raw Capture", pcap_idx, total_pcap);
+        let id = alloc_id();
+        let iface = if cfg.interface.is_empty() { "all interfaces".to_string() } else { cfg.interface.clone() };
+        info!("Starting {} (port={}, iface={})", name, cfg.port, iface);
+        sources::pcap::run(cfg.clone(), id, shred_tx.clone(), cancel.clone()).await?;
+        source_names.insert(id, name.clone());
+        active_shred_sources.push((id, name));
+        pcap_idx += 1;
+    }
+
     // ── Silence-timeout monitor ────────────────────────────────────────────────
     // Fires if no shred/slot event arrives for `silence_timeout` seconds.
     let activity = Arc::new(AtomicBool::new(true)); // start true to allow warmup
@@ -239,6 +268,7 @@ async fn main() -> Result<()> {
     // we wait a short grace period so straggler shreds for the last slot (delayed
     // paths, Turbine retransmissions) still make it into the registry.
     let mut range_end_triggered = false;
+    let mut start_slot_checked = false;
 
     let agg_task = tokio::spawn(async move {
         loop {
@@ -253,6 +283,21 @@ async fn main() -> Result<()> {
                                 activity_agg.store(true, Ordering::Relaxed);
                                 continue;
                             }
+                            // First shred at or beyond start_slot: check it isn't
+                            // already in the past relative to what we configured.
+                            if !start_slot_checked && start_slot_configured && slot > start_slot {
+                                start_slot_checked = true;
+                                warn!(
+                                    "start_slot {} is already in the past — \
+                                     first shred received is for slot {}. \
+                                     The slot range has already been missed. \
+                                     Please set a future start_slot and try again.",
+                                    start_slot, slot
+                                );
+                                cancel_agg.cancel();
+                                continue;
+                            }
+                            start_slot_checked = true;
                             if slot > end_slot {
                                 if slot_range_mode && !range_end_triggered {
                                     range_end_triggered = true;

@@ -1,82 +1,47 @@
 # ── Run mode ──────────────────────────────────────────────────────────────────
-# Option A: fixed duration (seconds)
+# Option A: fixed duration in seconds
 duration_secs = 60
 
-# Option B: slot range — set duration_secs = 0 to disable the time limit.
-# The run stops automatically once a shred beyond end_slot is seen.
+# Option B: slot range — omit duration_secs (or set it to 0)
+# The run stops automatically ~2s after a shred beyond end_slot is seen.
 # start_slot = 350000000
 # end_slot   = 350001000
 
-# Safety net: stop if no shreds arrive for this many seconds (default: 30).
+# Stop if no shreds arrive for this many seconds (default: 30).
 # silence_timeout_secs = 30
 
 # ── Sources ────────────────────────────────────────────────────────────────────
-# Each source type uses [[sources.<type>]] (array of tables).
-# You can define multiple instances of any type — add more [[sources.<type>]]
-# blocks as needed.  The `name` field is optional and defaults to the source
-# type name (e.g. "Raw UDP", "Raw UDP 2" if there are multiple).
+# At least one source is required. All others are optional.
+# Sources default to enabled = true, so you can omit the `enabled` line.
+# The `name` field is optional — defaults to the source type name.
+# Multiple instances of any type are supported — just add more blocks.
 
 [[sources.raw_udp]]
-# name = "Turbine Direct"
-enabled = true
-# Local address to bind for receiving Turbine shreds
 bind_addr = "0.0.0.0:8001"
-# Max UDP receive buffer size
-recv_buf_size = 10485760   # 10 MB
-
-# Example: a second raw UDP instance on a different port
-# [[sources.raw_udp]]
-# name = "Turbine Backup"
-# enabled = true
-# bind_addr = "0.0.0.0:8002"
-# recv_buf_size = 10485760
+recv_buf_size = 10485760   # 10 MB — optional, omit for system default
 
 [[sources.jito]]
 # name = "Jito Frankfurt"
-enabled = false
-
-# ── Option A: Direct block engine (no proxy needed) ──────────────────────────
-# The benchmark handles authentication and heartbeats internally.
-# Jito sends raw UDP shreds directly to your machine.
-block_engine_url = "https://frankfurt.mainnet.block-engine.jito.wtf"
+# Direct block engine — benchmark authenticates and sends heartbeats itself:
+block_engine_url  = "https://frankfurt.mainnet.block-engine.jito.wtf"
 auth_keypair_path = "/path/to/jito-keypair.json"
-#
-# Desired regions: Jito regional nodes that will forward shreds to you.
-# Available: amsterdam, frankfurt, ny, slc, tokyo
-desired_regions = ["frankfurt"]
-#
-# Your machine's public IP — Jito sends UDP shreds to this address.
-public_ip = "1.2.3.4"
-#
-# Local port to bind for receiving Jito's direct UDP shreds.
-udp_bind_addr = "0.0.0.0:20000"
-
-# ── Option B: Already-running jito-shredstream-proxy ─────────────────────────
-# Raw shreds from proxy --dest-ip-ports (shred-level comparison):
-proxy_udp_addr = ""   # e.g. "127.0.0.1:50001"
-#
-# Assembled entries from proxy --grpc-service-port (slot/entry-level):
-proxy_grpc_addr = ""  # e.g. "http://127.0.0.1:10001"
+desired_regions   = ["frankfurt"]
+public_ip         = "1.2.3.4"
+udp_bind_addr     = "0.0.0.0:20000"
+# Proxy mode (optional, can combine with direct):
+# proxy_udp_addr  = "127.0.0.1:50001"
+# proxy_grpc_addr = "http://127.0.0.1:10001"
 
 [[sources.doublezero]]
-# name = "DoubleZero"
-enabled = false
-# Multicast group IP (from doublezero on-chain account)
 multicast_group = "233.84.178.1"
-# UDP port for the multicast stream
-port = 7733
-# Interface to join multicast on (usually "doublezero1")
+port      = 7733
 interface = "doublezero1"
 
 [[sources.yellowstone]]
-# name = "Yellowstone"
-enabled = false
-# Yellowstone gRPC endpoint
 endpoint = "http://my-validator:10000"
-# Auth token
-x_token = ""
+# x_token = ""   # omit if no auth required
 
-# ── Output ─────────────────────────────────────────────────────────────────────
-[output]
-# Path for detailed log file (JSON lines). Leave empty to disable.
-log_file = ""
+# ── Output (optional) ─────────────────────────────────────────────────────────
+# Omit this section entirely if you don't want a log file.
+# [output]
+# log_file = "shredwatch.log"

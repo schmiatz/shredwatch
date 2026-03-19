@@ -1,12 +1,12 @@
 use serde::Deserialize;
 
-fn default_silence_timeout() -> u64 {
-    30
-}
+fn default_silence_timeout() -> u64 { 30 }
+fn default_true() -> bool { true }
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Config {
-    /// Run for this many seconds. Set to 0 when using start_slot/end_slot.
+    /// Run for this many seconds. Omit or set to 0 when using start_slot/end_slot.
+    #[serde(default)]
     pub duration_secs: u64,
     /// Only record shreds at or after this slot (optional).
     #[serde(default)]
@@ -17,7 +17,9 @@ pub struct Config {
     /// Stop if no shreds are received for this many seconds (default: 30).
     #[serde(default = "default_silence_timeout")]
     pub silence_timeout_secs: u64,
+    #[serde(default)]
     pub sources: SourcesConfig,
+    #[serde(default)]
     pub output: OutputConfig,
 }
 
@@ -31,66 +33,94 @@ pub struct SourcesConfig {
     pub doublezero: Vec<DoubleZeroConfig>,
     #[serde(default)]
     pub yellowstone: Vec<YellowstoneConfig>,
+    #[serde(default)]
+    pub pcap: Vec<PcapConfig>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct PcapConfig {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// UDP port to capture (e.g. your validator's TVU port).
+    #[serde(default)]
+    pub port: u16,
+    /// Network interface to capture on (e.g. "eth0").
+    /// Leave empty to capture on all interfaces.
+    #[serde(default)]
+    pub interface: String,
+    /// Socket receive buffer size in bytes. 0 = kernel default.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub recv_buf_size: usize,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct RawUdpConfig {
-    /// Display name used in result tables and log files.
     #[serde(default)]
     pub name: String,
+    /// Defaults to true — omit to enable, set false to disable.
+    #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
     pub bind_addr: String,
+    #[serde(default)]
     pub recv_buf_size: usize,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct JitoConfig {
-    /// Display name used in result tables and log files.
     #[serde(default)]
     pub name: String,
+    #[serde(default = "default_true")]
     pub enabled: bool,
-
-    // === Direct block engine connection (no proxy needed) ===
-    /// e.g. "https://frankfurt.mainnet.block-engine.jito.wtf"
+    // === Direct block engine connection ===
+    #[serde(default)]
     pub block_engine_url: String,
-    /// Path to a Solana keypair JSON file (64-byte array).
+    #[serde(default)]
     pub auth_keypair_path: String,
-    /// Jito regions to subscribe to, e.g. ["frankfurt", "amsterdam"].
+    #[serde(default)]
     pub desired_regions: Vec<String>,
-    /// Your machine's public IP address — Jito will send raw UDP shreds here.
+    #[serde(default)]
     pub public_ip: String,
-    /// Local address to bind for receiving Jito's direct UDP shreds.
+    #[serde(default)]
     pub udp_bind_addr: String,
-
     // === Already-running jito-shredstream-proxy ===
-    /// Bind address matching the proxy's --dest-ip-ports for raw shred forwarding.
+    #[serde(default)]
     pub proxy_udp_addr: String,
-    /// Address of the proxy's --grpc-service-port for entry-level streaming.
+    #[serde(default)]
     pub proxy_grpc_addr: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct DoubleZeroConfig {
-    /// Display name used in result tables and log files.
     #[serde(default)]
     pub name: String,
+    #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
     pub multicast_group: String,
+    #[serde(default)]
     pub port: u16,
+    #[serde(default)]
     pub interface: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct YellowstoneConfig {
-    /// Display name used in result tables and log files.
     #[serde(default)]
     pub name: String,
+    #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
     pub endpoint: String,
+    #[serde(default)]
     pub x_token: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
 pub struct OutputConfig {
+    #[serde(default)]
     pub log_file: String,
 }
