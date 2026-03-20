@@ -148,10 +148,17 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
         num_fmt(total),
         stats.sources.len()
     );
+    let slots_line = format!(
+        "Slots: {} → {} ({} observed)",
+        num_fmt(stats.min_slot),
+        num_fmt(stats.max_slot),
+        num_fmt(stats.slot_stats.total_slots),
+    );
     let width = 90;
     println!();
     println!("╔{}╗", "═".repeat(width));
     println!("║{:^width$}║", title, width = width);
+    println!("║{:^width$}║", slots_line, width = width);
     println!(
         "║{:^width$}║",
         format!(
@@ -302,12 +309,5 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
         println!();
     }
 
-    println!(
-        "  Total unique shreds: {}  ·  Total slots observed: {}  ·  Slot range: {} → {}",
-        num_fmt(total),
-        num_fmt(stats.slot_stats.total_slots),
-        num_fmt(stats.min_slot),
-        num_fmt(stats.max_slot),
-    );
     println!();
 }
