@@ -1,5 +1,5 @@
 use tabled::{settings::Style, Table, Tabled};
-use crate::stats::{compute_percentiles, BenchmarkStats, GrpcOverheadStats};
+use crate::stats::{compute_percentiles, BenchmarkStats, GrpcOverheadStats, SourceStats};
 
 fn fmt_ns(ns: u64) -> String {
     if ns == 0 {
@@ -165,14 +165,15 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
     println!("╚{}╝", "═".repeat(width));
     println!();
 
-    // Latency table
+    // Latency table — sorted by p50 ascending (fastest first)
     println!("LATENCY RELATIVE TO FIRST ARRIVAL  (per shred, data + FEC combined)");
-    let latency_rows: Vec<LatencyRow> = stats
+    let mut latency_data: Vec<(u64, LatencyRow)> = stats
         .sources
         .iter()
         .map(|s| {
             let p = compute_percentiles(s.latency_ns.clone());
-            LatencyRow {
+            let p50_raw = p.p50;
+            (p50_raw, LatencyRow {
                 source: s.name.clone(),
                 shreds: num_fmt(s.received),
                 p50: fmt_ns(p.p50),
@@ -181,15 +182,17 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
                 p99: fmt_ns(p.p99),
                 p99_9: fmt_ns(p.p99_9),
                 max: fmt_ns(p.max),
-            }
+            })
         })
         .collect();
+    latency_data.sort_by_key(|(p50, _)| *p50);
+    let latency_rows: Vec<LatencyRow> = latency_data.into_iter().map(|(_, r)| r).collect();
     println!("{}", Table::new(latency_rows).with(Style::sharp()));
     println!();
 
-    // First-arrival wins
+    // First-arrival wins — sorted by most wins descending
     println!("FIRST ARRIVAL WINS  (which source received each shred first)");
-    let win_rows: Vec<WinRow> = stats
+    let mut win_data: Vec<(u64, WinRow)> = stats
         .sources
         .iter()
         .map(|s| {
@@ -203,37 +206,44 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
             } else {
                 "N/A".to_string()
             };
-            WinRow {
+            (s.wins, WinRow {
                 source: s.name.clone(),
                 wins: num_fmt(s.wins),
                 of_total,
                 of_received,
-            }
+            })
         })
         .collect();
+    win_data.sort_by(|a, b| b.0.cmp(&a.0));
+    let win_rows: Vec<WinRow> = win_data.into_iter().map(|(_, r)| r).collect();
     println!("{}", Table::new(win_rows).with(Style::sharp()));
     println!();
 
-    // Coverage
+    // Coverage — sorted by highest received descending
     println!("COVERAGE & RELIABILITY");
-    let cov_rows: Vec<CoverageRow> = stats
+    let mut cov_data: Vec<(u64, CoverageRow)> = stats
         .sources
         .iter()
-        .map(|s| CoverageRow {
-            source: s.name.clone(),
-            received: num_fmt(s.received),
-            coverage: coverage(s.received, total),
-            dupes: num_fmt(s.dupes),
-            missed: num_fmt(s.missed),
+        .map(|s| {
+            (s.received, CoverageRow {
+                source: s.name.clone(),
+                received: num_fmt(s.received),
+                coverage: coverage(s.received, total),
+                dupes: num_fmt(s.dupes),
+                missed: num_fmt(s.missed),
+            })
         })
         .collect();
+    cov_data.sort_by(|a, b| b.0.cmp(&a.0));
+    let cov_rows: Vec<CoverageRow> = cov_data.into_iter().map(|(_, r)| r).collect();
     println!("{}", Table::new(cov_rows).with(Style::sharp()));
     println!();
 
-    // Shred type breakdown
+    // Shred type breakdown — sorted by highest received descending
     println!("SHRED TYPE BREAKDOWN");
-    let type_rows: Vec<ShredTypeRow> = stats
-        .sources
+    let mut sources_by_received: Vec<&SourceStats> = stats.sources.iter().collect();
+    sources_by_received.sort_by(|a, b| b.received.cmp(&a.received));
+    let type_rows: Vec<ShredTypeRow> = sources_by_received
         .iter()
         .map(|s| {
             let total_s = s.data_shreds + s.code_shreds;
@@ -257,15 +267,16 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
     println!("{}", Table::new(type_rows).with(Style::sharp()));
     println!();
 
-    // Entry/slot-level sources (Yellowstone, Jito gRPC entries, etc.)
-    let entry_rows: Vec<SlotRow> = stats
+    // Entry/slot-level sources — sorted by p50 ascending (fastest first)
+    let mut entry_data: Vec<(u64, SlotRow)> = stats
         .slot_stats
         .entry_sources
         .iter()
         .filter(|s| s.slots_seen > 0)
         .map(|s| {
             let p = compute_percentiles(s.latency_ns.clone());
-            SlotRow {
+            let p50_raw = p.p50;
+            (p50_raw, SlotRow {
                 source: s.name.clone(),
                 slots: num_fmt(s.slots_seen),
                 p50: fmt_ns(p.p50),
@@ -273,9 +284,11 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
                 p95: fmt_ns(p.p95),
                 p99: fmt_ns(p.p99),
                 max: fmt_ns(p.max),
-            }
+            })
         })
         .collect();
+    entry_data.sort_by_key(|(p50, _)| *p50);
+    let entry_rows: Vec<SlotRow> = entry_data.into_iter().map(|(_, r)| r).collect();
     if !entry_rows.is_empty() {
         println!("SLOT / ENTRY LATENCY  vs first shred arrival (any source)");
         println!("(time from earliest shred received across all sources → gRPC delivery; includes shred assembly + execution)");
@@ -283,13 +296,18 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
         println!();
     }
 
-    // gRPC overhead table — only shown when account_pubkey is configured
-    let grpc_rows: Vec<GrpcOverheadRow> = stats
+    // gRPC overhead table — sorted by p50 ascending (fastest first)
+    let mut grpc_data: Vec<(u64, GrpcOverheadRow)> = stats
         .grpc_overhead
         .iter()
         .filter(|s| s.samples > 0)
-        .map(grpc_overhead_row)
+        .map(|s| {
+            let p = compute_percentiles(s.latency_ns.clone());
+            (p.p50, grpc_overhead_row(s))
+        })
         .collect();
+    grpc_data.sort_by_key(|(p50, _)| *p50);
+    let grpc_rows: Vec<GrpcOverheadRow> = grpc_data.into_iter().map(|(_, r)| r).collect();
     if !grpc_rows.is_empty() {
         println!("YELLOWSTONE gRPC OVERHEAD  (entry processed → account update delivered)");
         println!("(pure gRPC latency after the validator executes the entry — shred assembly time excluded)");
