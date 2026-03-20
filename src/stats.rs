@@ -91,6 +91,8 @@ pub struct BenchmarkStats {
     pub slot_stats: SlotStats,
     pub grpc_overhead: Vec<GrpcOverheadStats>,
     pub duration_secs: f64,
+    pub min_slot: u64,
+    pub max_slot: u64,
 }
 
 pub fn compute_stats(
@@ -100,6 +102,17 @@ pub fn compute_stats(
     duration_secs: f64,
 ) -> BenchmarkStats {
     let total_unique_shreds = registry.shreds.len() as u64;
+
+    let mut min_slot = u64::MAX;
+    let mut max_slot = 0u64;
+    for entry in registry.shreds.iter() {
+        let slot = entry.key().slot;
+        min_slot = min_slot.min(slot);
+        max_slot = max_slot.max(slot);
+    }
+    if min_slot == u64::MAX {
+        min_slot = 0;
+    }
 
     // Per shred-level source stats
     let mut source_stats: Vec<SourceStats> = active_shred_sources
@@ -187,5 +200,7 @@ pub fn compute_stats(
         slot_stats,
         grpc_overhead,
         duration_secs,
+        min_slot,
+        max_slot,
     }
 }

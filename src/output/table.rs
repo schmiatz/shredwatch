@@ -303,9 +303,11 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
     }
 
     println!(
-        "  Total unique shreds: {}  ·  Total slots observed: {}",
+        "  Total unique shreds: {}  ·  Total slots observed: {}  ·  Slot range: {} → {}",
         num_fmt(total),
-        num_fmt(stats.slot_stats.total_slots)
+        num_fmt(stats.slot_stats.total_slots),
+        num_fmt(stats.min_slot),
+        num_fmt(stats.max_slot),
     );
     println!();
 }
