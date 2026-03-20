@@ -63,8 +63,6 @@ struct WinRow {
     wins: String,
     #[tabled(rename = "of Total")]
     of_total: String,
-    #[tabled(rename = "of Received")]
-    of_received: String,
 }
 
 #[derive(Tabled)]
@@ -196,21 +194,10 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
         .sources
         .iter()
         .map(|s| {
-            let of_total = if total > 0 {
-                format!("{:.1}%", s.wins as f64 / total as f64 * 100.0)
-            } else {
-                "N/A".to_string()
-            };
-            let of_received = if s.received > 0 {
-                format!("{:.1}%", s.wins as f64 / s.received as f64 * 100.0)
-            } else {
-                "N/A".to_string()
-            };
             (s.wins, WinRow {
                 source: s.name.clone(),
                 wins: num_fmt(s.wins),
-                of_total,
-                of_received,
+                of_total: num_fmt(s.received),
             })
         })
         .collect();
