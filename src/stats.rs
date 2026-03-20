@@ -105,8 +105,8 @@ pub fn compute_stats(
 
     let mut min_slot = u64::MAX;
     let mut max_slot = 0u64;
-    for entry in registry.shreds.iter() {
-        let slot = entry.key().slot;
+    for entry in registry.slots.iter() {
+        let slot = *entry.key();
         min_slot = min_slot.min(slot);
         max_slot = max_slot.max(slot);
     }
