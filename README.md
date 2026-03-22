@@ -80,7 +80,7 @@ Produces **two separate measurements**:
 Per-shred latency delta vs the globally fastest source. If Raw UDP has p50 = 0 µs and DoubleZero has p50 = 18 µs, DoubleZero consistently lags by ~18 µs at the median. Sources with a lot of zero-deltas are frequently first.
 
 **FIRST ARRIVAL WINS**
-How often each source received a shred before all others, as a percentage of total unique shreds. The most direct answer to "which source is fastest overall."
+For each shred, which source delivered it first. Shows `Won First` (count), `Total Received` (how many shreds that source saw), and `Win Rate` (Won First / Total Received). A source with low total received but high win rate is fast when it has the data — it just doesn't cover all validators.
 
 **COVERAGE & RELIABILITY**
 What fraction of all observed shreds each source received. A source can be fast but still miss shreds — coverage shows reliability.
@@ -109,13 +109,16 @@ duration_secs = 60
 # end_slot   = 350001000
 
 [[sources.raw_udp]]
+name = "Turbine"
 bind_addr = "0.0.0.0:8001"
 
 [[sources.pcap]]
+name = "TVU Capture"
 port      = 8001        # your validator's TVU port
-interface = "eth0"      # omit to capture all interfaces
+interface = "eth0"      # optional — omit to capture all interfaces
 
 [[sources.jito]]
+name = "Jito Frankfurt"
 block_engine_url  = "https://frankfurt.mainnet.block-engine.jito.wtf"
 auth_keypair_path = "/path/to/keypair.json"
 desired_regions   = ["frankfurt"]
@@ -123,11 +126,13 @@ public_ip         = "1.2.3.4"
 udp_bind_addr     = "0.0.0.0:20000"
 
 [[sources.doublezero]]
+name = "DoubleZero"
 multicast_group = "233.84.178.1"
 port            = 7733
 interface       = "doublezero1"
 
 [[sources.yellowstone]]
+name = "Yellowstone"
 endpoint       = "http://127.0.0.1:10000"
 account_pubkey = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"  # optional
 account_name   = "Token Program"                                   # optional display name
@@ -154,6 +159,41 @@ Raw packet capture requires the `cap_net_raw` capability on the binary:
 ```bash
 sudo setcap cap_net_raw=eip ./target/release/shredwatch
 ```
+
+---
+
+## Plots
+
+Enable the log file in your config to record per-shred data:
+
+```toml
+[output]
+log_file = "shredwatch.log"
+```
+
+Then generate an interactive HTML report:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install plotly
+
+python3 plot.py shredwatch.log report.html
+```
+
+To view the report from a remote server:
+
+```bash
+python3 -m http.server 8080
+```
+
+Then open `http://<server-ip>:8080/report.html` in your browser.
+
+The report includes:
+- **Latency distribution** — histogram showing how many shreds arrived at each delay
+- **Latency over time** — scatter plot revealing spikes and patterns over the run
+- **CDF curves** — cumulative distribution comparing sources (the full version of the percentile table)
+- **Per-slot stacked bar** — which source won each slot's shreds, showing leader correlation
 
 ---
 
