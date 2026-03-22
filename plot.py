@@ -145,12 +145,34 @@ def build_report(entries, output_path):
     fig.update_xaxes(title_text="Slot", row=4, col=1)
     fig.update_yaxes(title_text="Shreds Won", row=4, col=1)
 
+    # Build a color legend string like "● Source A  ● Source B  ● Source C"
+    legend_parts = []
+    for i, src in enumerate(sources):
+        color = colors[i % len(colors)]
+        legend_parts.append(f'<span style="color:{color}">●</span> {src}')
+    legend_text = "&nbsp;&nbsp;&nbsp;".join(legend_parts)
+
+    # Add color legend annotation above each subplot
+    # Subplot title y-positions for 4 equal rows with 0.07 spacing
+    subplot_y_positions = [1.0, 0.735, 0.47, 0.205]
+    annotations = list(fig.layout.annotations)  # keep existing subplot titles
+    for y_pos in subplot_y_positions:
+        annotations.append(dict(
+            text=legend_text,
+            xref="paper", yref="paper",
+            x=0.5, y=y_pos - 0.015,
+            showarrow=False,
+            font=dict(size=11),
+            xanchor="center", yanchor="top",
+        ))
+
     fig.update_layout(
         title="Shredwatch Report",
-        height=2000,
+        height=2200,
         template="plotly_dark",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
         barmode="stack",
+        annotations=annotations,
     )
 
     fig.write_html(str(output_path), include_plotlyjs="cdn")
