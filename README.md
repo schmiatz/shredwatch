@@ -26,6 +26,8 @@ The tool installs a classic BPF filter in the kernel so only packets on the conf
 sudo setcap cap_net_raw=eip ./target/release/shredwatch
 ```
 
+**IP filtering:** each pcap source can optionally filter by source IP. Use `source_ips` to only capture packets from specific IPs, or `exclude_ips` to ignore specific IPs. This lets you measure individual shred providers that deliver to the same TVU port. Multiple pcap sources on the same port and interface share a single socket — one `recv()` per packet, one timestamp, routed to all matching sources.
+
 **Measures:** exactly what your running validator receives, timestamped the instant the packet exits the kernel receive path — the most direct possible view of Turbine delivery to your node.
 
 ---
@@ -116,6 +118,18 @@ bind_addr = "0.0.0.0:8001"
 name = "TVU Capture"
 port      = 8001        # your validator's TVU port
 interface = "eth0"      # optional — omit to capture all interfaces
+
+# Multiple pcap sources on the same port share one socket.
+# Use source_ips / exclude_ips to measure individual providers.
+#[[sources.pcap]]
+#name = "Provider A"
+#port = 8001
+#source_ips = ["1.1.1.1"]
+#
+#[[sources.pcap]]
+#name = "Turbine (excl. Provider A)"
+#port = 8001
+#exclude_ips = ["1.1.1.1"]
 
 [[sources.jito]]
 name = "Jito Frankfurt"
