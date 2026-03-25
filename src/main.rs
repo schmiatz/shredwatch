@@ -236,17 +236,49 @@ async fn main() -> Result<()> {
     }
 
     // ── Raw packet capture sources (AF_PACKET) ────────────────────────────────
-    let total_pcap = config.sources.pcap.iter().filter(|c| c.enabled).count();
-    let mut pcap_idx = 0;
-    for cfg in config.sources.pcap.iter().filter(|c| c.enabled) {
-        let name = source_name(&cfg.name, "Raw Capture", pcap_idx, total_pcap);
-        let id = alloc_id();
-        let iface = if cfg.interface.is_empty() { "all interfaces".to_string() } else { cfg.interface.clone() };
-        info!("Starting {} (port={}, iface={})", name, cfg.port, iface);
-        sources::pcap::run(cfg.clone(), id, shred_tx.clone(), cancel.clone()).await?;
-        source_names.insert(id, name.clone());
-        active_shred_sources.push((id, name));
-        pcap_idx += 1;
+    // Group pcap sources by (port, interface) so each group shares one socket.
+    {
+        use std::collections::BTreeMap;
+        use std::net::Ipv4Addr;
+
+        let total_pcap = config.sources.pcap.iter().filter(|c| c.enabled).count();
+        let mut pcap_idx = 0;
+
+        // (port, interface) → Vec<(name, source_id, include_ips, exclude_ips, recv_buf_size)>
+        let mut groups: BTreeMap<(u16, String), Vec<(String, SourceId, std::collections::HashSet<Ipv4Addr>, std::collections::HashSet<Ipv4Addr>, usize)>> = BTreeMap::new();
+
+        for cfg in config.sources.pcap.iter().filter(|c| c.enabled) {
+            let name = source_name(&cfg.name, "Raw Capture", pcap_idx, total_pcap);
+            let id = alloc_id();
+            let include: std::collections::HashSet<Ipv4Addr> = cfg.source_ips.iter()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            let exclude: std::collections::HashSet<Ipv4Addr> = cfg.exclude_ips.iter()
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            let key = (cfg.port, cfg.interface.clone());
+            groups.entry(key).or_default().push((name.clone(), id, include, exclude, cfg.recv_buf_size));
+            source_names.insert(id, name.clone());
+            active_shred_sources.push((id, name));
+            pcap_idx += 1;
+        }
+
+        for ((port, interface), members) in groups {
+            let iface_display = if interface.is_empty() { "all".to_string() } else { interface.clone() };
+            let member_names: Vec<&str> = members.iter().map(|(n, _, _, _, _)| n.as_str()).collect();
+            info!("Starting pcap socket (port={}, iface={}) for: {:?}", port, iface_display, member_names);
+
+            let recv_buf = members.iter().map(|(_, _, _, _, r)| *r).max().unwrap_or(0);
+            let routes: Vec<sources::pcap::PcapRoute> = members.into_iter()
+                .map(|(_, id, include, exclude, _)| sources::pcap::PcapRoute {
+                    source_id: id,
+                    include_ips: include,
+                    exclude_ips: exclude,
+                })
+                .collect();
+
+            sources::pcap::run(port, interface, recv_buf, routes, shred_tx.clone(), cancel.clone()).await?;
+        }
     }
 
     // ── Silence-timeout monitor ────────────────────────────────────────────────

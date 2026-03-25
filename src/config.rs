@@ -52,8 +52,15 @@ pub struct PcapConfig {
     pub interface: String,
     /// Socket receive buffer size in bytes. 0 = kernel default.
     #[serde(default)]
-    #[allow(dead_code)]
     pub recv_buf_size: usize,
+    /// Only capture packets from these source IPs (optional).
+    /// When set, only shreds from these IPs are recorded for this source.
+    #[serde(default)]
+    pub source_ips: Vec<String>,
+    /// Exclude packets from these source IPs (optional).
+    /// When set, shreds from these IPs are ignored for this source.
+    #[serde(default)]
+    pub exclude_ips: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]

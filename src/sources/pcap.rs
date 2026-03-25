@@ -1,20 +1,35 @@
+use std::collections::HashSet;
+use std::net::Ipv4Addr;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use anyhow::Result;
 
-use crate::config::PcapConfig;
 use crate::registry::{ShredEvent, SourceId};
 
+/// One routing entry per pcap source sharing a socket.
+/// The capture loop checks each packet against all routes and sends a ShredEvent
+/// for every matching source, using a single timestamp.
+#[allow(dead_code)]
+pub struct PcapRoute {
+    pub source_id: SourceId,
+    pub include_ips: HashSet<Ipv4Addr>,
+    pub exclude_ips: HashSet<Ipv4Addr>,
+}
+
+/// Spawn a single AF_PACKET capture thread for the given port/interface,
+/// routing packets to one or more sources based on IP filters.
 pub async fn run(
-    config: PcapConfig,
-    source_id: SourceId,
+    port: u16,
+    interface: String,
+    recv_buf_size: usize,
+    routes: Vec<PcapRoute>,
     tx: mpsc::UnboundedSender<ShredEvent>,
     cancel: CancellationToken,
 ) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = linux::capture_loop(&config, source_id, &tx, &cancel) {
+            if let Err(e) = linux::capture_loop(port, &interface, recv_buf_size, &routes, &tx, &cancel) {
                 tracing::error!("Raw packet capture error: {:#}", e);
             }
         });
@@ -22,7 +37,7 @@ pub async fn run(
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (config, source_id, tx, cancel);
+        let _ = (port, interface, recv_buf_size, routes, tx, cancel);
         anyhow::bail!("Raw packet capture (AF_PACKET) is only supported on Linux")
     }
 }
@@ -30,27 +45,32 @@ pub async fn run(
 #[cfg(target_os = "linux")]
 mod linux {
     use std::ffi::CString;
+    use std::net::Ipv4Addr;
     use std::time::Instant;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
     use tracing::{info, warn};
 
-    use crate::config::PcapConfig;
     use crate::registry::{ShredEvent, SourceId};
     use crate::shred::parse_shred_key;
+    use super::PcapRoute;
+
+    /// Extract the source IPv4 address from a raw Ethernet frame.
+    /// Source IP is at byte offset 26 (14-byte Ethernet header + 12 bytes into IP header).
+    fn extract_src_ip(buf: &[u8]) -> Option<Ipv4Addr> {
+        if buf.len() < 30 { return None; }
+        Some(Ipv4Addr::new(buf[26], buf[27], buf[28], buf[29]))
+    }
 
     /// Extract the UDP payload from a raw Ethernet frame.
     /// Returns None if not IPv4/UDP or fragmented.
     fn extract_udp_payload(buf: &[u8]) -> Option<&[u8]> {
         if buf.len() < 42 { return None; }
-        // Ethertype must be IPv4 (0x0800)
         if u16::from_be_bytes([buf[12], buf[13]]) != 0x0800 { return None; }
         let ip_start = 14;
         let ihl = ((buf[ip_start] & 0x0f) * 4) as usize;
         if ihl < 20 || buf.len() < ip_start + ihl + 8 { return None; }
-        // Protocol must be UDP (17)
         if buf[ip_start + 9] != 17 { return None; }
-        // Reject fragmented packets
         if u16::from_be_bytes([buf[ip_start + 6], buf[ip_start + 7]]) & 0x1fff != 0 {
             return None;
         }
@@ -62,14 +82,30 @@ mod linux {
         Some(&buf[payload_start..payload_start + payload_len])
     }
 
+    /// Check whether this packet's source IP matches a route's filter.
+    fn route_matches(route: &PcapRoute, src_ip: Option<Ipv4Addr>) -> bool {
+        let has_filter = !route.include_ips.is_empty() || !route.exclude_ips.is_empty();
+        if !has_filter {
+            return true;
+        }
+        let Some(ip) = src_ip else { return false };
+        if !route.include_ips.is_empty() && !route.include_ips.contains(&ip) {
+            return false;
+        }
+        if !route.exclude_ips.is_empty() && route.exclude_ips.contains(&ip) {
+            return false;
+        }
+        true
+    }
+
     pub fn capture_loop(
-        config: &PcapConfig,
-        source_id: SourceId,
+        port: u16,
+        interface: &str,
+        recv_buf_size: usize,
+        routes: &[PcapRoute],
         tx: &mpsc::UnboundedSender<ShredEvent>,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        // AF_PACKET SOCK_RAW delivers complete Ethernet frames.
-        // Requires CAP_NET_RAW capability (or root).
         let fd = unsafe {
             libc::socket(
                 libc::AF_PACKET,
@@ -89,32 +125,19 @@ mod linux {
         }
 
         // Classic BPF filter: udp dst port <port>
-        // All offsets are from the start of the Ethernet frame.
-        //
-        //  [0]  ldh  [12]          — ethertype
-        //  [1]  jeq  #0x0800       — IPv4?          skip → drop
-        //  [2]  ldb  [23]          — IP protocol
-        //  [3]  jeq  #17           — UDP?            skip → drop
-        //  [4]  ldh  [20]          — IP flags+frag offset
-        //  [5]  jset #0x1fff       — fragmented?     match → drop
-        //  [6]  ldxb 4*([14]&0xf)  — x = IP header length
-        //  [7]  ldh  [x+16]        — UDP dst port (eth=14, udp_dport_off=2 → x+16)
-        //  [8]  jeq  #PORT         — our port?       skip → drop
-        //  [9]  ret  #0xffff       — accept
-        //  [10] ret  #0            — drop
-        let port = config.port as u32;
+        let port_u32 = port as u32;
         let filter: [libc::sock_filter; 11] = [
-            libc::sock_filter { code: 0x28, jt: 0, jf: 0,  k: 12     },
-            libc::sock_filter { code: 0x15, jt: 0, jf: 8,  k: 0x0800 },
-            libc::sock_filter { code: 0x30, jt: 0, jf: 0,  k: 23     },
-            libc::sock_filter { code: 0x15, jt: 0, jf: 6,  k: 0x11   },
-            libc::sock_filter { code: 0x28, jt: 0, jf: 0,  k: 20     },
-            libc::sock_filter { code: 0x45, jt: 4, jf: 0,  k: 0x1fff },
-            libc::sock_filter { code: 0xb1, jt: 0, jf: 0,  k: 14     },
-            libc::sock_filter { code: 0x48, jt: 0, jf: 0,  k: 16     },
-            libc::sock_filter { code: 0x15, jt: 0, jf: 1,  k: port   },
-            libc::sock_filter { code: 0x06, jt: 0, jf: 0,  k: 0xffff },
-            libc::sock_filter { code: 0x06, jt: 0, jf: 0,  k: 0      },
+            libc::sock_filter { code: 0x28, jt: 0, jf: 0,  k: 12       },
+            libc::sock_filter { code: 0x15, jt: 0, jf: 8,  k: 0x0800   },
+            libc::sock_filter { code: 0x30, jt: 0, jf: 0,  k: 23       },
+            libc::sock_filter { code: 0x15, jt: 0, jf: 6,  k: 0x11     },
+            libc::sock_filter { code: 0x28, jt: 0, jf: 0,  k: 20       },
+            libc::sock_filter { code: 0x45, jt: 4, jf: 0,  k: 0x1fff   },
+            libc::sock_filter { code: 0xb1, jt: 0, jf: 0,  k: 14       },
+            libc::sock_filter { code: 0x48, jt: 0, jf: 0,  k: 16       },
+            libc::sock_filter { code: 0x15, jt: 0, jf: 1,  k: port_u32 },
+            libc::sock_filter { code: 0x06, jt: 0, jf: 0,  k: 0xffff   },
+            libc::sock_filter { code: 0x06, jt: 0, jf: 0,  k: 0        },
         ];
         let prog = libc::sock_fprog {
             len: filter.len() as u16,
@@ -133,15 +156,14 @@ mod linux {
             return Err(std::io::Error::last_os_error().into());
         }
 
-        // Optionally bind to a specific interface; omitting captures all interfaces.
-        if !config.interface.is_empty() {
+        if !interface.is_empty() {
             let ifindex = unsafe {
-                let name = CString::new(config.interface.as_str())?;
+                let name = CString::new(interface)?;
                 libc::if_nametoindex(name.as_ptr())
             };
             if ifindex == 0 {
                 unsafe { libc::close(fd); }
-                anyhow::bail!("Interface '{}' not found", config.interface);
+                anyhow::bail!("Interface '{}' not found", interface);
             }
             let sll = libc::sockaddr_ll {
                 sll_family:   libc::AF_PACKET as u16,
@@ -164,9 +186,8 @@ mod linux {
             }
         }
 
-        // Receive buffer size (optional)
-        if config.recv_buf_size > 0 {
-            let size = config.recv_buf_size as libc::c_int;
+        if recv_buf_size > 0 {
+            let size = recv_buf_size as libc::c_int;
             unsafe {
                 libc::setsockopt(
                     fd, libc::SOL_SOCKET, libc::SO_RCVBUF,
@@ -186,12 +207,20 @@ mod linux {
             );
         }
 
-        let iface = if config.interface.is_empty() { "all interfaces" } else { &config.interface };
-        info!("Raw packet capture started (port={}, iface={})", config.port, iface);
+        let iface_display = if interface.is_empty() { "all" } else { interface };
+        info!(
+            "Raw packet capture started (port={}, iface={}, {} route{})",
+            port, iface_display, routes.len(),
+            if routes.len() == 1 { "" } else { "s" }
+        );
 
         let mut buf = vec![0u8; 2048];
         let mut raw_count: u64 = 0;
         let mut parsed_count: u64 = 0;
+        // Per-route match counter for logging
+        let mut route_counts: Vec<u64> = vec![0; routes.len()];
+
+        let has_any_filter = routes.iter().any(|r| !r.include_ips.is_empty() || !r.exclude_ips.is_empty());
 
         loop {
             if cancel.is_cancelled() { break; }
@@ -213,10 +242,23 @@ mod linux {
             }
 
             raw_count += 1;
-            if let Some(payload) = extract_udp_payload(&buf[..n as usize]) {
+            let frame = &buf[..n as usize];
+
+            let src_ip = if has_any_filter { extract_src_ip(frame) } else { None };
+
+            if let Some(payload) = extract_udp_payload(frame) {
                 if let Some(key) = parse_shred_key(payload) {
                     parsed_count += 1;
-                    let _ = tx.send(ShredEvent { source: source_id, key, received_at });
+                    for (i, route) in routes.iter().enumerate() {
+                        if route_matches(route, src_ip) {
+                            route_counts[i] += 1;
+                            let _ = tx.send(ShredEvent {
+                                source: route.source_id,
+                                key: key.clone(),
+                                received_at,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -226,6 +268,9 @@ mod linux {
             "Raw packet capture stopped ({} packets, {} parsed as shreds)",
             raw_count, parsed_count
         );
+        for (i, route) in routes.iter().enumerate() {
+            info!("  route {:?}: {} shreds matched", route.source_id, route_counts[i]);
+        }
         Ok(())
     }
 }
