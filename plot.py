@@ -30,6 +30,7 @@ def build_report(entries, output_path):
     source_deltas = defaultdict(list)       # source -> [delta_ns]
     source_over_time = defaultdict(lambda: {"t": [], "delta": []})  # source -> {t[], delta[]}
     slot_wins = defaultdict(lambda: defaultdict(int))  # slot -> {source -> count}
+    slot_deltas = defaultdict(lambda: defaultdict(list))  # slot -> {source -> [delta_ns]}
     all_sources = set()
 
     for e in entries:
@@ -45,6 +46,7 @@ def build_report(entries, output_path):
             source_deltas[src].append(delta)
             source_over_time[src]["t"].append(t_ns / 1e9)  # seconds
             source_over_time[src]["delta"].append(delta / 1e6)  # ms
+            slot_deltas[slot][src].append(delta)
 
     sources = sorted(all_sources)
 
@@ -53,7 +55,7 @@ def build_report(entries, output_path):
         subplot_titles=(
             "Latency Distribution (histogram)",
             "Latency Over Time (scatter)",
-            "CDF — Cumulative Latency Distribution",
+            "Per-Slot Median Latency (line — p50 solid, p90 dashed)",
             "Per-Slot First Arrival Wins (stacked bar)",
         ),
         vertical_spacing=0.07,
@@ -86,7 +88,6 @@ def build_report(entries, output_path):
     # 2) Scatter — latency over time
     for i, src in enumerate(sources):
         data = source_over_time[src]
-        # Downsample if too many points for browser performance
         step = max(1, len(data["t"]) // 50_000)
         fig.add_trace(
             go.Scattergl(
@@ -103,37 +104,61 @@ def build_report(entries, output_path):
     fig.update_xaxes(title_text="Time since start (s)", row=2, col=1)
     fig.update_yaxes(title_text="Latency (ms)", row=2, col=1)
 
-    # 3) CDF
+    # 3) Per-slot median latency lines (Grafana-style)
+    slots_sorted = sorted(slot_deltas.keys())
+    slot_labels = [str(s) for s in slots_sorted]
     for i, src in enumerate(sources):
-        sorted_ms = sorted(d / 1e6 for d in source_deltas[src])
-        n = len(sorted_ms)
-        # Downsample CDF for performance
-        step = max(1, n // 10_000)
-        x = sorted_ms[::step]
-        y = [(j * step + 1) / n * 100 for j in range(len(x))]
+        p50_vals = []
+        p90_vals = []
+        for s in slots_sorted:
+            ds = slot_deltas[s].get(src)
+            if ds:
+                sorted_ds = sorted(ds)
+                n = len(sorted_ds)
+                p50_vals.append(sorted_ds[int(n * 0.5)] / 1e6)
+                p90_vals.append(sorted_ds[min(int(n * 0.9), n - 1)] / 1e6)
+            else:
+                p50_vals.append(None)
+                p90_vals.append(None)
+
+        color = colors[i % len(colors)]
+        # p50 — solid line
         fig.add_trace(
             go.Scatter(
-                x=x,
-                y=y,
+                x=slot_labels, y=p50_vals,
                 mode="lines",
                 name=src,
                 legendgroup=src,
                 showlegend=False,
-                line=dict(color=colors[i % len(colors)], width=2),
+                line=dict(color=color, width=2),
+                connectgaps=False,
             ),
             row=3, col=1,
         )
-    fig.update_xaxes(title_text="Latency (ms)", row=3, col=1)
-    fig.update_yaxes(title_text="Percentile (%)", row=3, col=1)
+        # p90 — dashed line
+        fig.add_trace(
+            go.Scatter(
+                x=slot_labels, y=p90_vals,
+                mode="lines",
+                name=f"{src} p90",
+                legendgroup=src,
+                showlegend=False,
+                line=dict(color=color, width=1, dash="dash"),
+                connectgaps=False,
+            ),
+            row=3, col=1,
+        )
+    fig.update_xaxes(title_text="Slot", row=3, col=1)
+    fig.update_yaxes(title_text="Latency (ms)", row=3, col=1)
 
     # 4) Per-slot stacked bar
-    slots_sorted = sorted(slot_wins.keys())
-    slot_labels = [str(s) for s in slots_sorted]
+    slot_labels_wins = [str(s) for s in sorted(slot_wins.keys())]
+    slots_sorted_wins = sorted(slot_wins.keys())
     for i, src in enumerate(sources):
-        counts = [slot_wins[s].get(src, 0) for s in slots_sorted]
+        counts = [slot_wins[s].get(src, 0) for s in slots_sorted_wins]
         fig.add_trace(
             go.Bar(
-                x=slot_labels,
+                x=slot_labels_wins,
                 y=counts,
                 name=src,
                 legendgroup=src,
@@ -153,9 +178,8 @@ def build_report(entries, output_path):
     legend_text = "&nbsp;&nbsp;&nbsp;".join(legend_parts)
 
     # Add color legend annotation above each subplot
-    # Subplot title y-positions for 4 equal rows with 0.07 spacing
     subplot_y_positions = [1.0, 0.735, 0.47, 0.205]
-    annotations = list(fig.layout.annotations)  # keep existing subplot titles
+    annotations = list(fig.layout.annotations)
     for y_pos in subplot_y_positions:
         annotations.append(dict(
             text=legend_text,
