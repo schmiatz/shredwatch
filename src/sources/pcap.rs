@@ -51,7 +51,7 @@ mod linux {
     use tokio_util::sync::CancellationToken;
     use tracing::{info, warn};
 
-    use crate::registry::{ShredEvent, SourceId};
+    use crate::registry::ShredEvent;
     use crate::shred::parse_shred_key;
     use super::PcapRoute;
 
