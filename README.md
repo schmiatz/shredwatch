@@ -110,6 +110,10 @@ duration_secs = 60
 # start_slot = 350000000
 # end_slot   = 350001000
 
+# Only record shreds from a specific leader's slots (optional)
+# leader_pubkey = "YourValidatorPubkey..."
+# rpc_url = "http://127.0.0.1:8899"
+
 [[sources.raw_udp]]
 name = "Turbine"
 bind_addr = "0.0.0.0:8001"

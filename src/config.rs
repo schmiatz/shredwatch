@@ -17,6 +17,13 @@ pub struct Config {
     /// Stop if no shreds are received for this many seconds (default: 30).
     #[serde(default = "default_silence_timeout")]
     pub silence_timeout_secs: u64,
+    /// Only record shreds from slots where this validator is leader (optional).
+    /// Base58-encoded validator identity pubkey.
+    #[serde(default)]
+    pub leader_pubkey: String,
+    /// RPC endpoint for fetching leader schedule. Required when leader_pubkey is set.
+    #[serde(default)]
+    pub rpc_url: String,
     #[serde(default)]
     pub sources: SourcesConfig,
     #[serde(default)]

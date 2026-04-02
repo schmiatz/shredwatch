@@ -10,6 +10,7 @@ use chrono::Utc;
 use anyhow::{Context, Result};
 
 mod config;
+mod leader;
 mod shred;
 mod registry;
 mod stats;
@@ -117,6 +118,16 @@ async fn main() -> Result<()> {
         let dur = config.duration_secs.max(1);
         info!("Benchmark duration: {}s (silence timeout: {}s)", dur, config.silence_timeout_secs);
     }
+
+    // Optional leader filter: only record shreds from slots where this validator is leader
+    let leader_slots: Option<std::collections::HashSet<u64>> = if !config.leader_pubkey.is_empty() {
+        if config.rpc_url.is_empty() {
+            anyhow::bail!("leader_pubkey is set but rpc_url is missing — need an RPC endpoint to fetch the leader schedule");
+        }
+        Some(leader::fetch_leader_slots(&config.rpc_url, &config.leader_pubkey).await?)
+    } else {
+        None
+    };
 
     let registry = Arc::new(Registry::new());
     let cancel = CancellationToken::new();
@@ -314,6 +325,7 @@ async fn main() -> Result<()> {
     let registry_agg = Arc::clone(&registry);
     let cancel_agg = cancel.clone();
     let activity_agg = Arc::clone(&activity);
+    let leader_filter = leader_slots;
     // When the first shred beyond end_slot arrives we don't cancel immediately —
     // we wait a short grace period so straggler shreds for the last slot (delayed
     // paths, Turbine retransmissions) still make it into the registry.
@@ -366,6 +378,13 @@ async fn main() -> Result<()> {
                                 }
                                 continue;
                             }
+                            // Leader filter: skip shreds from non-leader slots
+                            if let Some(ref slots) = leader_filter {
+                                if !slots.contains(&slot) {
+                                    activity_agg.store(true, Ordering::Relaxed);
+                                    continue;
+                                }
+                            }
                             activity_agg.store(true, Ordering::Relaxed);
                             registry_agg.record_shred(event);
                         }
@@ -390,6 +409,12 @@ async fn main() -> Result<()> {
                                     });
                                 }
                                 continue;
+                            }
+                            if let Some(ref slots) = leader_filter {
+                                if !slots.contains(&slot) {
+                                    activity_agg.store(true, Ordering::Relaxed);
+                                    continue;
+                                }
                             }
                             activity_agg.store(true, Ordering::Relaxed);
                             registry_agg.record_slot_event(event);
