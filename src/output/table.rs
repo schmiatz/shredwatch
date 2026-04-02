@@ -140,7 +140,7 @@ fn grpc_overhead_row(s: &GrpcOverheadStats) -> GrpcOverheadRow {
     }
 }
 
-pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono::Utc>) {
+pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono::Utc>, leader_pubkey: Option<&str>) {
     let total = stats.total_unique_shreds;
 
     // Header
@@ -161,6 +161,10 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
     println!("╔{}╗", "═".repeat(width));
     println!("║{:^width$}║", title, width = width);
     println!("║{:^width$}║", slots_line, width = width);
+    if let Some(pubkey) = leader_pubkey {
+        let leader_line = format!("Leader filter: {}", pubkey);
+        println!("║{:^width$}║", leader_line, width = width);
+    }
     println!(
         "║{:^width$}║",
         format!(

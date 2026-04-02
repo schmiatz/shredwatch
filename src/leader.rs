@@ -100,11 +100,29 @@ pub async fn fetch_leader_slots(rpc_url: &str, leader_pubkey: &str) -> Result<Ha
         .map(|idx| epoch_first_slot + idx)
         .collect();
 
+    let current_slot = absolute_slot;
+    let future_slots: Vec<u64> = leader_slots.iter()
+        .filter(|&&s| s > current_slot)
+        .copied()
+        .collect();
+
+    if future_slots.is_empty() {
+        anyhow::bail!(
+            "Validator {} has {} leader slots in the current epoch but all are in the past \
+             (current slot: {}). No upcoming leader slots to benchmark.",
+            leader_pubkey,
+            leader_slots.len(),
+            current_slot
+        );
+    }
+
+    let next_leader_slot = *future_slots.iter().min().unwrap();
     info!(
-        "Leader schedule loaded: {} has {} leader slots in current epoch (first slot: {})",
+        "Leader schedule loaded: {} has {} leader slots in current epoch ({} upcoming, next: {})",
         leader_pubkey,
         leader_slots.len(),
-        epoch_first_slot
+        future_slots.len(),
+        next_leader_slot
     );
 
     Ok(leader_slots)

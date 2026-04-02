@@ -462,7 +462,8 @@ async fn main() -> Result<()> {
     );
 
     let bench_stats = compute_stats(&registry, &active_shred_sources, &active_entry_sources, actual_duration);
-    print_results(&bench_stats, start_wall);
+    let leader_pub = if config.leader_pubkey.is_empty() { None } else { Some(config.leader_pubkey.as_str()) };
+    print_results(&bench_stats, start_wall, leader_pub);
 
     if let Some(path) = log_path {
         info!("Writing log to {}", path);
