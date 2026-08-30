@@ -1,4 +1,5 @@
 use std::net::UdpSocket;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -49,7 +50,12 @@ pub async fn run(
                 Ok((len, _addr)) => {
                     let received_at = Instant::now();
                     if let Some(key) = parse_shred_key(&buf[..len]) {
-                        let _ = tx.send(ShredEvent { source: source_id, key, received_at });
+                        let _ = tx.send(ShredEvent {
+                            source: source_id,
+                            key,
+                            received_at,
+                            payload: Arc::from(&buf[..len]),
+                        });
                     }
                 }
                 Err(e)

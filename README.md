@@ -4,6 +4,10 @@ Connects to multiple Solana shred sources simultaneously, records nanosecond-pre
 
 All latency numbers are relative — measured against the earliest arrival across all running sources on the same machine. No clock sync required.
 
+For raw-shred sources, shredwatch also reconstructs each source independently. It parses the current Agave Merkle shred wire format, performs Reed–Solomon recovery, and structurally validates the reconstructed entry and versioned-transaction stream. A source completes a slot only when every data shred from index `0` through `LAST_SHRED_IN_SLOT` is present or recovered and every completed data batch decodes successfully.
+
+The primary comparison is full-block availability: the receive timestamp of the last packet that made a source's block reconstructable, relative to the earliest source that reconstructed the same slot. Reconstruction CPU time is reported separately, so local processing order does not bias provider network latency.
+
 ---
 
 ## Sources
@@ -77,6 +81,15 @@ Produces **two separate measurements**:
 ---
 
 ## Output tables
+
+**FULL BLOCK AVAILABILITY**
+For each source and slot, measures when that source could reconstruct the complete block relative to the first source that completed the same slot. This is the primary provider comparison.
+
+**FULL BLOCK ASSEMBLY TIME**
+Time from a source's first shred for a slot until that source has enough data to reconstruct and decode the complete block.
+
+**FULL BLOCK COMPLETION & RECOVERY**
+Shows completed-slot coverage, first-completion wins, recovered data shreds and FEC sets, decoded entry/transaction totals, and local reconstruction CPU time.
 
 **LATENCY RELATIVE TO FIRST ARRIVAL**
 Per-shred latency delta vs the globally fastest source. If Raw UDP has p50 = 0 µs and DoubleZero has p50 = 18 µs, DoubleZero consistently lags by ~18 µs at the median. Sources with a lot of zero-deltas are frequently first.
@@ -160,7 +173,12 @@ account_name   = "Token Program"                                   # optional di
 
 ## Usage
 
+Requirements: a recent stable Rust toolchain, `protoc`, and access to at least one source. Raw packet capture and DoubleZero require Linux.
+
 ```bash
+cp config.example.toml config.toml
+# Edit config.toml: keep only sources you can actually receive.
+
 cargo build --release
 
 # Run with default config.toml
@@ -172,6 +190,8 @@ cargo build --release
 # Slot range mode (duration ignored when start/end slot set)
 ./target/release/shredwatch --config slot-range.toml
 ```
+
+For a meaningful provider race, configure at least two raw-shred sources on the same machine. With one source, reconstruction and assembly measurements still work, but all relative provider latency values are zero. A Raw UDP listener does not discover Turbine traffic by itself: a validator must be in the Turbine tree or forward shreds to the configured port.
 
 Raw packet capture requires the `cap_net_raw` capability on the binary:
 ```bash
@@ -207,7 +227,7 @@ python3 -m http.server 8080
 
 Then open `http://<server-ip>:8080/report.html` in your browser.
 
-The report includes:
+The report currently visualizes the existing per-shred log and includes:
 - **Latency distribution** — histogram showing how many shreds arrived at each delay
 - **Latency over time** — scatter plot revealing spikes and patterns over the run
 - **CDF curves** — cumulative distribution comparing sources (the full version of the percentile table)
@@ -220,5 +240,8 @@ The report includes:
 - All latency numbers are relative to the fastest source on the same machine — not absolute wall-clock latency from block production
 - Cannot compare across machines (no clock sync)
 - With only one source enabled, the latency table shows all zeros
+- Full-block completion is available only for raw-shred sources (Raw UDP, Raw Capture, Jito UDP, and DoubleZero); Yellowstone and Jito gRPC remain slot/entry-level measurements
+- The benchmark parses the current Agave Merkle wire format and enforces header/FEC consistency, but does not verify Merkle proofs or leader signatures; run it only against sources you intend to benchmark
+- Full-block availability uses packet receive timestamps; the separate CPU column reports time spent recovering, deshredding, and decoding
 - Yellowstone measurements are at slot/entry granularity and cannot be directly compared to per-shred numbers
 - Raw packet capture and DoubleZero are Linux-only

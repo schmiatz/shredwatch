@@ -1,4 +1,5 @@
 use std::time::Instant;
+use std::sync::Arc;
 use dashmap::DashMap;
 use crate::shred::ShredKey;
 
@@ -8,10 +9,31 @@ use crate::shred::ShredKey;
 pub struct SourceId(pub u32);
 
 /// Event from a shred-level source (Raw UDP, Jito UDP, DoubleZero)
+#[derive(Clone)]
 pub struct ShredEvent {
     pub source: SourceId,
     pub key: ShredKey,
     pub received_at: Instant,
+    /// Exact UDP payload. PCAP routes share it rather than copying the packet.
+    pub payload: Arc<[u8]>,
+}
+
+/// The point at which one source had enough valid shreds to reconstruct and
+/// deserialize a complete slot.
+#[derive(Debug, Clone)]
+pub struct ReconstructionEvent {
+    pub source: SourceId,
+    pub slot: u64,
+    /// Arrival timestamp of the final packet needed for reconstruction.
+    pub reconstructable_at: Instant,
+    pub first_source_shred_at: Instant,
+    pub expected_data_shreds: u32,
+    pub received_shreds: u32,
+    pub recovered_data_shreds: u32,
+    pub fec_sets_recovered: u32,
+    pub entries: u64,
+    pub transactions: u64,
+    pub reconstruction_cpu_ns: u64,
 }
 
 /// Event from an entry/slot-level source (Yellowstone, Jito gRPC entries)
@@ -49,6 +71,8 @@ pub struct Registry {
     pub slots: DashMap<u64, SlotRecord>,
     /// Per-source gRPC overhead samples (entry processed → account update delivered), in nanoseconds.
     pub grpc_latencies: DashMap<SourceId, Vec<u64>>,
+    /// One immutable completion record per (source, slot).
+    pub reconstructions: DashMap<(SourceId, u64), ReconstructionEvent>,
     pub start_time: Instant,
 }
 
@@ -58,8 +82,15 @@ impl Registry {
             shreds: DashMap::new(),
             slots: DashMap::new(),
             grpc_latencies: DashMap::new(),
+            reconstructions: DashMap::new(),
             start_time: Instant::now(),
         }
+    }
+
+    pub fn record_reconstruction(&self, event: ReconstructionEvent) {
+        self.reconstructions
+            .entry((event.source, event.slot))
+            .or_insert(event);
     }
 
     pub fn record_grpc_latency(&self, event: GrpcLatencyEvent) {

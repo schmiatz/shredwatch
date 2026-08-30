@@ -46,6 +46,7 @@ pub async fn run(
 mod linux {
     use std::ffi::CString;
     use std::net::Ipv4Addr;
+    use std::sync::Arc;
     use std::time::Instant;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
@@ -249,13 +250,15 @@ mod linux {
             if let Some(payload) = extract_udp_payload(frame) {
                 if let Some(key) = parse_shred_key(payload) {
                     parsed_count += 1;
+                    let payload = Arc::from(payload);
                     for (i, route) in routes.iter().enumerate() {
                         if route_matches(route, src_ip) {
                             route_counts[i] += 1;
                             let _ = tx.send(ShredEvent {
                                 source: route.source_id,
-                                key: key.clone(),
+                                key,
                                 received_at,
+                                payload: Arc::clone(&payload),
                             });
                         }
                     }

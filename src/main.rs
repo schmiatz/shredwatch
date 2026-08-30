@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 
 mod config;
 mod leader;
+mod reconstruction;
 mod shred;
 mod registry;
 mod stats;
@@ -18,6 +19,7 @@ mod sources;
 mod output;
 
 use config::Config;
+use reconstruction::ReconstructionTracker;
 use registry::{GrpcLatencyEvent, Registry, ShredEvent, SlotEvent, SourceId};
 use stats::compute_stats;
 use output::table::print_results;
@@ -331,6 +333,7 @@ async fn main() -> Result<()> {
     // paths, Turbine retransmissions) still make it into the registry.
     let mut range_end_triggered = false;
     let mut start_slot_checked = false;
+    let mut reconstruction_tracker = ReconstructionTracker::default();
 
     let agg_task = tokio::spawn(async move {
         loop {
@@ -386,6 +389,9 @@ async fn main() -> Result<()> {
                                 }
                             }
                             activity_agg.store(true, Ordering::Relaxed);
+                            if let Some(completed) = reconstruction_tracker.record(&event) {
+                                registry_agg.record_reconstruction(completed);
+                            }
                             registry_agg.record_shred(event);
                         }
                         None => break,
@@ -456,9 +462,10 @@ async fn main() -> Result<()> {
 
     let actual_duration = Instant::now().duration_since(start_instant).as_secs_f64();
     info!(
-        "Collected {} unique shreds across {} slots",
+        "Collected {} unique shreds across {} slots; reconstructed {} source/slot blocks",
         registry.shreds.len(),
-        registry.slots.len()
+        registry.slots.len(),
+        registry.reconstructions.len(),
     );
 
     let bench_stats = compute_stats(&registry, &active_shred_sources, &active_entry_sources, actual_duration);
