@@ -1,5 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::sync::mpsc;
@@ -112,6 +113,7 @@ pub async fn run(
                             source: source_id,
                             key,
                             received_at,
+                            payload: Arc::from(&buf[..len]),
                         });
                     } else {
                         debug!("DoubleZero: packet len={} did not parse as shred", len);
