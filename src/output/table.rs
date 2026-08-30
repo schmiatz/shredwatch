@@ -1,5 +1,5 @@
 use tabled::{settings::Style, Table, Tabled};
-use crate::stats::{compute_percentiles, BenchmarkStats, GrpcOverheadStats, SourceStats};
+use crate::stats::{compute_percentiles, BenchmarkStats, BlockSourceStats, GrpcOverheadStats, SourceStats};
 
 fn fmt_ns(ns: u64) -> String {
     if ns == 0 {
@@ -127,11 +127,68 @@ struct GrpcOverheadRow {
     max: String,
 }
 
+#[derive(Tabled)]
+struct BlockLatencyRow {
+    #[tabled(rename = "Source")]
+    source: String,
+    #[tabled(rename = "Blocks")]
+    blocks: String,
+    #[tabled(rename = "  p50  ")]
+    p50: String,
+    #[tabled(rename = "  p90  ")]
+    p90: String,
+    #[tabled(rename = "  p95  ")]
+    p95: String,
+    #[tabled(rename = "  p99  ")]
+    p99: String,
+    #[tabled(rename = "   max  ")]
+    max: String,
+}
+
+#[derive(Tabled)]
+struct BlockSummaryRow {
+    #[tabled(rename = "Source")]
+    source: String,
+    #[tabled(rename = "Complete")]
+    complete: String,
+    #[tabled(rename = "Coverage")]
+    coverage: String,
+    #[tabled(rename = "Won First")]
+    wins: String,
+    #[tabled(rename = "Data Recovered")]
+    recovered_data: String,
+    #[tabled(rename = "FEC Sets")]
+    recovered_fec_sets: String,
+    #[tabled(rename = "Source Shreds")]
+    received_shreds: String,
+    #[tabled(rename = "Data Shreds")]
+    expected_data_shreds: String,
+    #[tabled(rename = "Entries")]
+    entries: String,
+    #[tabled(rename = "Transactions")]
+    transactions: String,
+    #[tabled(rename = "FEC + Decode CPU p50")]
+    cpu_p50: String,
+}
+
 fn grpc_overhead_row(s: &GrpcOverheadStats) -> GrpcOverheadRow {
     let p = compute_percentiles(s.latency_ns.clone());
     GrpcOverheadRow {
         source: s.name.clone(),
         samples: num_fmt(s.samples),
+        p50: fmt_ns(p.p50),
+        p90: fmt_ns(p.p90),
+        p95: fmt_ns(p.p95),
+        p99: fmt_ns(p.p99),
+        max: fmt_ns(p.max),
+    }
+}
+
+fn block_latency_row(s: &BlockSourceStats, latency_ns: Vec<u64>) -> BlockLatencyRow {
+    let p = compute_percentiles(latency_ns);
+    BlockLatencyRow {
+        source: s.name.clone(),
+        blocks: num_fmt(s.completed_slots),
         p50: fmt_ns(p.p50),
         p90: fmt_ns(p.p90),
         p95: fmt_ns(p.p95),
@@ -176,7 +233,90 @@ pub fn print_results(stats: &BenchmarkStats, start_time: chrono::DateTime<chrono
     println!("╚{}╝", "═".repeat(width));
     println!();
 
-    // Latency table — sorted by p50 ascending (fastest first)
+    // Full-block reconstruction is the primary result.
+    if stats.block_stats.total_slots == 0 {
+        println!("FULL BLOCK RECONSTRUCTION");
+        println!("No source reconstructed a complete slot during this run.");
+        println!("(A complete result requires data index 0 through LAST_SHRED_IN_SLOT, successful FEC recovery where needed, and valid Entry decoding.)");
+        println!();
+    } else {
+        println!("FULL BLOCK AVAILABILITY  (completion delta vs fastest source for the same slot)");
+        let mut relative_rows: Vec<(u64, BlockLatencyRow)> = stats
+            .block_stats
+            .sources
+            .iter()
+            .filter(|source| source.completed_slots > 0)
+            .map(|source| {
+                let p50 = compute_percentiles(source.relative_latency_ns.clone()).p50;
+                (
+                    p50,
+                    block_latency_row(source, source.relative_latency_ns.clone()),
+                )
+            })
+            .collect();
+        relative_rows.sort_by_key(|(p50, _)| *p50);
+        println!(
+            "{}",
+            Table::new(relative_rows.into_iter().map(|(_, row)| row)).with(Style::sharp())
+        );
+        println!();
+
+        println!("FULL BLOCK ASSEMBLY TIME  (source's first shred → reconstructable block)");
+        let mut assembly_rows: Vec<(u64, BlockLatencyRow)> = stats
+            .block_stats
+            .sources
+            .iter()
+            .filter(|source| source.completed_slots > 0)
+            .map(|source| {
+                let p50 = compute_percentiles(source.assembly_latency_ns.clone()).p50;
+                (
+                    p50,
+                    block_latency_row(source, source.assembly_latency_ns.clone()),
+                )
+            })
+            .collect();
+        assembly_rows.sort_by_key(|(p50, _)| *p50);
+        println!(
+            "{}",
+            Table::new(assembly_rows.into_iter().map(|(_, row)| row)).with(Style::sharp())
+        );
+        println!();
+
+        println!("FULL BLOCK COMPLETION & RECOVERY");
+        let mut summary_rows: Vec<(u64, BlockSummaryRow)> = stats
+            .block_stats
+            .sources
+            .iter()
+            .map(|source| {
+                (
+                    source.completed_slots,
+                    BlockSummaryRow {
+                        source: source.name.clone(),
+                        complete: num_fmt(source.completed_slots),
+                        coverage: coverage(source.completed_slots, stats.block_stats.total_slots),
+                        wins: num_fmt(source.wins),
+                        recovered_data: num_fmt(source.recovered_data_shreds),
+                        recovered_fec_sets: num_fmt(source.fec_sets_recovered),
+                        received_shreds: num_fmt(source.received_shreds),
+                        expected_data_shreds: num_fmt(source.expected_data_shreds),
+                        entries: num_fmt(source.entries),
+                        transactions: num_fmt(source.transactions),
+                        cpu_p50: fmt_ns(
+                            compute_percentiles(source.reconstruction_cpu_ns.clone()).p50,
+                        ),
+                    },
+                )
+            })
+            .collect();
+        summary_rows.sort_by_key(|row| std::cmp::Reverse(row.0));
+        println!(
+            "{}",
+            Table::new(summary_rows.into_iter().map(|(_, row)| row)).with(Style::sharp())
+        );
+        println!();
+    }
+
+    // Per-shred latency remains a supporting diagnostic.
     println!("LATENCY RELATIVE TO FIRST ARRIVAL  (per shred, data + FEC combined)");
     let mut latency_data: Vec<(u64, LatencyRow)> = stats
         .sources
